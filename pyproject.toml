@@ -1,0 +1,6 @@
+[tool.uvicorn]
+reload = true
+reload-dir = ["C:/Users/User/pythonProject/Project_dedup_19.04.25/my_venv/src"] # для автоматической перезагрзки сервера при внесении изменений в код
+
+#reload = true
+#reload-dir = ["my_venv/src"]
