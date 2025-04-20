@@ -1,74 +1,3 @@
-# import aio_pika
-# from aio_pika.abc import (
-#     AbstractConnection,
-#     AbstractChannel,
-#     AbstractIncomingMessage,
-#     AbstractQueue,
-# )
-# import orjson
-# import asyncio
-# from my_venv.src.config import settings
-# from my_venv.src.database.database import AsyncSessionLocal, engine
-# from my_venv.src.models.ORM_models import EventIncomingORM
-# from my_venv.src.utils.logger import logger
-#
-# async def process_message(event_data: dict):
-#     try:
-#         async with AsyncSessionLocal() as session:
-#             event_orm = EventIncomingORM(**event_data)
-#             session.add(event_orm)
-#             await session.commit()
-#             logger.info(f"Event saved: {event_data['event_hash']}")
-#     except Exception as e:
-#         logger.error(f"DB Error: {str(e)}")
-#         await session.rollback()
-#         raise
-#
-# async def handle_message(message: AbstractIncomingMessage):
-#     async with message.process():
-#         try:
-#             event_data = orjson.loads(message.body)
-#             await process_message(event_data)
-#             await message.ack()
-#         except Exception as e:
-#             logger.error(f"Processing failed: {str(e)}")
-#             await message.nack(requeue=False)
-#
-# async def consume_events():
-#     connection: AbstractConnection | None = None
-#     try:
-#         connection = await aio_pika.connect(settings.RABBITMQ_URL)
-#         channel: AbstractChannel = await connection.channel()
-#         await channel.set_qos(prefetch_count=100)
-#
-#         queue: AbstractQueue = await channel.declare_queue(
-#             "events",
-#             durable=True,
-#             arguments={"x-queue-type": "quorum"}
-#         )
-#
-#         logger.info("Worker started. Waiting for messages...")
-#         async with queue.iterator() as queue_iter:
-#             async for message in queue_iter:
-#                 msg: AbstractIncomingMessage = message
-#                 await handle_message(msg)
-#
-#     except asyncio.CancelledError:
-#         logger.info("Worker stopping...")
-#     except Exception as e:
-#         logger.critical(f"Critical error: {str(e)}")
-#         raise
-#     finally:
-#         if connection:
-#             await connection.close()
-#         await engine.dispose()
-#
-# if __name__ == "__main__":
-#     try:
-#         asyncio.run(consume_events())
-#     except KeyboardInterrupt:
-#         logger.info("Worker stopped by user")
-
 import aio_pika
 import orjson
 import asyncio
@@ -107,22 +36,6 @@ async def process_message(event_data: dict):
         await session.rollback()
         raise
 
-
-# async def handle_message(message: AbstractIncomingMessage):
-#     async with message.process():
-#         try:
-#             event_data = orjson.loads(message.body)
-#             await process_message(event_data)
-#             await message.ack()
-#         except orjson.JSONDecodeError as e:
-#             logger.error(f"Invalid JSON: {str(e)}")
-#             await message.nack(requeue=False)
-#         except ValueError as e:
-#             logger.error(f"Validation error: {str(e)}")
-#             await message.nack(requeue=False)
-#         except Exception as e:
-#             logger.error(f"Processing failed: {str(e)}")
-#             await message.nack(requeue=False)
 
 async def handle_message(message: AbstractIncomingMessage):
     session = None
