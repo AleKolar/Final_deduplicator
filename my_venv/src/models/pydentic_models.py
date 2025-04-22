@@ -1,89 +1,30 @@
-# from datetime import datetime
-# from pydantic import BaseModel, field_validator, model_validator
-# from typing import Optional, Dict, Any
-#
-# class EventBase(BaseModel):
-#     id: Optional[int] = None
-#     event_hash: str
-#     event_name: str
-#     event_datetime: datetime
-#     created_at: Optional[datetime] = None
-#     raw_data: Dict[str, Any]
-#
-#     class Config:
-#         json_encoders = {
-#             datetime: lambda v: v.isoformat()
-#         }
-#
-# class EventCreate(EventBase):
-#     @model_validator(mode='before')
-#     @classmethod
-#     def validate_required_fields(cls, values):
-#         required = {'event_name', 'event_datetime'}
-#         if not required.issubset(values.keys()):
-#             missing = required - set(values.keys())
-#             raise ValueError(f"Missing required fields: {missing}")
-#         return values
-#
-#     @field_validator('*', mode='before')
-#     @classmethod
-#     def validate_empty_values(cls, value, field):
-#         if field.name in ['event_name', 'event_datetime']:
-#             if not value:
-#                 raise ValueError(f"{field.name} cannot be empty")
-#         return value
-#
-# class EventResponse(EventBase):
-#     class Config:
-#         from_attributes = True
-
-from pydantic import BaseModel, ValidationError, field_validator, model_validator
+from pydantic import BaseModel, model_validator
 from datetime import datetime
 from typing import Optional, Dict, Any
+import hashlib
+import json
 
+class EventCreate(BaseModel):
+    """Модель для создания события с динамическими полями"""
+    event_name: Optional[str] = None
+    event_datetime: Optional[datetime] = None
+    # Все остальные поля как опциональные
+    # ...
 
-class EventBase(BaseModel):
-    id: Optional[int] = None
-    event_hash: str
-    event_name: str
-    event_datetime: datetime
-    created_at: Optional[datetime] = None
-    raw_data: Dict[str, Any]
-
-    # Валидация конкретных полей
-    @classmethod
-    @field_validator('event_name', 'event_datetime', mode='before')
-    def validate_required_fields(cls, value):
-        """Проверка обязательных полей перед валидацией"""
-        if not value:
-            raise ValueError("Field cannot be empty")
-        return value
-
-    # Валидация всей модели
     @model_validator(mode='after')
-    def validate_event_structure(self):
-        """Комплексная проверка после валидации"""
-        if not self.event_name.strip():
-            raise ValueError("Event name must not be empty")
-
-        if self.event_datetime < datetime.now():
-            raise ValueError("Event datetime must be in the future")
-
+    def generate_unique_hash(self):
+        """Генерация уникального хэша на основе всех полей"""
+        data = self.model_dump(exclude_unset=True, exclude_none=True)
+        data_str = json.dumps(data, sort_keys=True)
+        self.event_hash = hashlib.sha256(data_str.encode()).hexdigest()
         return self
 
+class EventResponse(EventCreate):
+    """Модель ответа с системными полями"""
+    id: int
+    created_at: datetime
+    raw_data: Dict[str, Any]
 
-class EventCreate(EventBase):
-    # Валидация с преобразованием данных
-    @classmethod
-    @field_validator('event_datetime', mode='before')
-    def parse_datetime(cls, value):
-        """Преобразование строки в datetime"""
-        if isinstance(value, str):
-            return datetime.fromisoformat(value)
-        return value
-
-
-class EventResponse(EventBase):
     class Config:
         from_attributes = True
         json_encoders = {
