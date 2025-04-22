@@ -1,28 +1,35 @@
 from typing import Dict, Any
-""" Проверка хэша происходит на основе нормализованных данных,
-в логике, что event_hash производное от нормализованных данных """
+from collections import OrderedDict as ColOrderedDict
 
 
 def normalize_for_hashing(raw_data: Dict[str, Any], event_name: str) -> Dict[str, Any]:
-    """Нормализация только для генерации хэша без изменения исходных данных"""
-    # 1. Базовые обязательные поля
-    normalized = {
-        "event_name": event_name,
-        "client_id": raw_data.get("client_id"),
-        "content_id": raw_data.get("content_id"),
-        "product_id": raw_data.get("product_id")
-    }
+    """Улучшенная нормализация для генерации хэша"""
+    # 1. Создаем базовую структуру с явными типами
+    normalized: ColOrderedDict[str, Any] = ColOrderedDict([
+        ("event_name", event_name),
+        ("client_id", None),
+        ("content_id", None),
+        ("product_id", None)
+    ])
 
-    # 2. Динамические поля из raw_data (исключая технические и пустые)
-    additional_fields = {
-        k: v for k, v in raw_data.items()
-        if not k.startswith('_')
-           and k not in normalized  # Исключаем уже обработанные
-           and v not in (None, "", [], {})
-    }
+    # 2. Заполняем базовые поля из raw_data
+    for key in normalized.keys():
+        if key != "event_name" and raw_data.get(key) not in (None, "", [], {}):
+            normalized[key] = raw_data.get(key)
 
-    # 3. Объединяем и сортируем
-    combined = {**normalized, **additional_fields}
-    return dict(sorted(combined.items()))
+    # 3. Добавляем динамические поля
+    for key in sorted(raw_data.keys()):
+        if (
+                key not in normalized
+                and not key.startswith(('_', 'event_'))
+                and raw_data[key] not in (None, "", [], {})
+        ):
+            normalized[key] = raw_data[key]
 
+    # 4. Фильтруем и возвращаем обычный dict (сохраняя порядок)
+    return dict(
+        (k, v)
+        for k, v in normalized.items()
+        if v is not None
+    )
 

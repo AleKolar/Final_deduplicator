@@ -10,3 +10,8 @@ __pycache__/
 .DS_Store
 my_venv/
 *
+
+# tests
+tests/load/results/*
+!tests/load/results/.gitkeep
+tests/load/config/.env
