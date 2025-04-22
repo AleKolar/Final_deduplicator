@@ -1,81 +1,91 @@
-import hashlib
-import json
-from datetime import datetime, timezone
+# from datetime import datetime
+# from pydantic import BaseModel, field_validator, model_validator
+# from typing import Optional, Dict, Any
+#
+# class EventBase(BaseModel):
+#     id: Optional[int] = None
+#     event_hash: str
+#     event_name: str
+#     event_datetime: datetime
+#     created_at: Optional[datetime] = None
+#     raw_data: Dict[str, Any]
+#
+#     class Config:
+#         json_encoders = {
+#             datetime: lambda v: v.isoformat()
+#         }
+#
+# class EventCreate(EventBase):
+#     @model_validator(mode='before')
+#     @classmethod
+#     def validate_required_fields(cls, values):
+#         required = {'event_name', 'event_datetime'}
+#         if not required.issubset(values.keys()):
+#             missing = required - set(values.keys())
+#             raise ValueError(f"Missing required fields: {missing}")
+#         return values
+#
+#     @field_validator('*', mode='before')
+#     @classmethod
+#     def validate_empty_values(cls, value, field):
+#         if field.name in ['event_name', 'event_datetime']:
+#             if not value:
+#                 raise ValueError(f"{field.name} cannot be empty")
+#         return value
+#
+# class EventResponse(EventBase):
+#     class Config:
+#         from_attributes = True
+
+from pydantic import BaseModel, ValidationError, field_validator, model_validator
+from datetime import datetime
 from typing import Optional, Dict, Any
-from pydantic import BaseModel, Field, ConfigDict, model_validator, field_validator
 
 
 class EventBase(BaseModel):
-    event_hash: Optional[str] = None
-    event_name: Optional[str] = None
-    event_datetime: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    profile_id: Optional[str] = None
-    device_ip: Optional[str] = None
-    raw_data: Dict[str, Any] = Field(default_factory=dict)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    id: Optional[int] = None
+    event_hash: str
+    event_name: str
+    event_datetime: datetime
+    created_at: Optional[datetime] = None
+    raw_data: Dict[str, Any]
 
-    model_config = ConfigDict(
-        extra='ignore',
-        populate_by_name=True
-    )
-
-    @model_validator(mode='before')
+    # Валидация конкретных полей
     @classmethod
-    def prepare_data(cls, data: Any) -> Dict[str, Any]:
-        if isinstance(data, dict):
-            # Собираем все дополнительные поля
-            model_fields = cls.model_fields.keys()
-            extra_fields = {k: v for k, v in data.items() if k not in model_fields}
+    @field_validator('event_name', 'event_datetime', mode='before')
+    def validate_required_fields(cls, value):
+        """Проверка обязательных полей перед валидацией"""
+        if not value:
+            raise ValueError("Field cannot be empty")
+        return value
 
-            # Объединяем с существующим raw_data
-            raw_data = {**data.get('raw_data', {}), **extra_fields}
+    # Валидация всей модели
+    @model_validator(mode='after')
+    def validate_event_structure(self):
+        """Комплексная проверка после валидации"""
+        if not self.event_name.strip():
+            raise ValueError("Event name must not be empty")
 
-            # Фильтруем только разрешенные поля
-            filtered_data = {k: v for k, v in data.items() if k in model_fields}
+        if self.event_datetime < datetime.now():
+            raise ValueError("Event datetime must be in the future")
 
-            return {
-                **filtered_data,
-                'raw_data': raw_data,
-                'created_at': data.get('created_at', datetime.now(timezone.utc))
-            }
-        return data
-
-    @field_validator('event_datetime', 'created_at', mode='before')
-    @classmethod
-    def parse_datetime(cls, value: Any) -> datetime:
-        if isinstance(value, datetime):
-            return value
-        try:
-            return datetime.fromisoformat(str(value).replace('Z', '+00:00'))
-        except (TypeError, ValueError):
-            return datetime.now(timezone.utc)
+        return self
 
 
 class EventCreate(EventBase):
-    model_config = ConfigDict(
-        json_encoders={datetime: lambda v: v.isoformat()}
-    )
-
-    @field_validator('event_hash', mode='before')
+    # Валидация с преобразованием данных
     @classmethod
-    def generate_event_hash(cls, v, values):
-        if v is None:
-            # Генерируем хэш из ключевых полей
-            hash_data = {
-                'event_name': values.get('event_name'),
-                'event_datetime': values.get('event_datetime'),
-                'user_agent': values.get('user_agent')
-            }
-            return hashlib.sha256(
-                json.dumps(hash_data, sort_keys=True).encode()
-            ).hexdigest()
-        return v
+    @field_validator('event_datetime', mode='before')
+    def parse_datetime(cls, value):
+        """Преобразование строки в datetime"""
+        if isinstance(value, str):
+            return datetime.fromisoformat(value)
+        return value
 
 
 class EventResponse(EventBase):
-    id: int
-    event_hash: str
-    model_config = ConfigDict(
-        from_attributes=True,
-        json_encoders={datetime: lambda v: v.isoformat()}
-    )
+    class Config:
+        from_attributes = True
+        json_encoders = {
+            datetime: lambda v: v.isoformat()
+        }

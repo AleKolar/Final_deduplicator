@@ -1,20 +1,20 @@
 from datetime import datetime
 from typing import Dict, Any, List, Optional
-
-from aio_pika.abc import AbstractRobustConnection
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import ValidationError
+from pydantic import ValidationError, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 import httpx
 import aio_pika
 import orjson
 from redis.asyncio import Redis
+from fastapi.encoders import jsonable_encoder
 
 from my_venv.src.config import settings
 from my_venv.src.database.database import get_db
 from my_venv.src.models.pydentic_models import EventCreate, EventResponse
 from my_venv.src.services.deduplicator import Deduplicator
-from my_venv.src.services.repository import EventRepository, PostgresEventRepository
+from my_venv.src.services.repository import PostgresEventRepository
+from my_venv.src.services.event_hashing import EventHashService, HashGenerationError
 from my_venv.src.utils.exceptions import (
     DatabaseError,
     DuplicateEventError,
@@ -24,6 +24,37 @@ from my_venv.src.utils.exceptions import (
 
 router = APIRouter(prefix="/events", tags=["events"])
 
+
+# region Helper Functions
+def remove_empty_values(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Рекурсивно удаляет пустые значения из словаря"""
+
+    def is_empty(value):
+        if isinstance(value, (list, dict)):
+            return not bool(value)
+        if isinstance(value, str):
+            return not value.strip()
+        return value in (None, "", {}, [])
+
+    if isinstance(data, dict):
+        return {
+            k: remove_empty_values(v)
+            for k, v in data.items()
+            if not is_empty(v)
+        }
+    return data
+
+
+def is_invalid_event(event_data: Dict[str, Any]) -> bool:
+    """Проверяет наличие критически пустых полей"""
+    required_fields = {'event_name', 'event_datetime', 'user_agent'}
+    return any(
+        not event_data.get(field)
+        for field in required_fields
+    )
+
+
+# endregion
 
 # region Dependency Injections
 async def get_redis() -> Redis:
@@ -39,28 +70,28 @@ async def get_redis() -> Redis:
         await redis.close()
 
 
-async def get_rabbitmq() -> AbstractRobustConnection:
-    """Устанавливает и возвращает подключение к RabbitMQ"""
+async def get_rabbitmq() -> aio_pika.Connection:
+    """Устанавливает подключение к RabbitMQ"""
     try:
         return await aio_pika.connect_robust(
             settings.RABBITMQ_URL,
             timeout=10
         )
     except Exception as e:
-        raise MessageQueueError(f"Ошибка подключения к RabbitMQ: {str(e)}")
+        raise MessageQueueError(
+            message="Ошибка подключения к брокеру сообщений",
+            error_details=str(e)
+        )
 
 
 async def get_repository(
         session: AsyncSession = Depends(get_db),
         redis: Redis = Depends(get_redis)
-) -> EventRepository:
-    # Создаем Deduplicator из Redis подключения
-    deduplicator = Deduplicator(redis)
-
-    # Возвращаем КОНКРЕТНУЮ реализацию для PostgreSQL
+) -> PostgresEventRepository:
+    """Фабрика репозитория с зависимостями"""
     return PostgresEventRepository(
         session=session,
-        deduplicator=deduplicator
+        deduplicator=Deduplicator(redis)
     )
 
 
@@ -72,51 +103,68 @@ async def create_event(
         payload: Dict[str, Any],
         rabbitmq: aio_pika.Connection = Depends(get_rabbitmq)
 ):
-    """
-    Создание нового события через брокер сообщений
-    """
+    """Создание нового события через брокер сообщений"""
     try:
+        # Очистка и проверка данных
+        cleaned_data = remove_empty_values(payload)
+
+        if is_invalid_event(cleaned_data):
+            raise HTTPException(400, detail="Event has missing required fields")
+
         # Валидация и подготовка данных
-        event = EventCreate(**payload)
-        response_data = EventResponse(**event.model_dump())
+        event = EventCreate(**cleaned_data)
+        event_data = event.model_dump()
+
+        # Генерация хэша
+        event_hash = EventHashService.generate(
+            raw_data=event_data,
+            event_name=event.event_name,
+            use_timestamp=False
+        )
+        event_data['event_hash'] = event_hash
 
         # Публикация в очередь
         async with rabbitmq.channel() as channel:
             await channel.default_exchange.publish(
                 aio_pika.Message(
-                    body=orjson.dumps(event.model_dump()),
+                    body=orjson.dumps(event_data),
                     delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
                     headers={"source": "api"}
                 ),
                 routing_key="events_queue"
             )
 
-        return response_data
+        return EventResponse(
+            **event_data,
+            id=0,  # Временное значение
+            created_at=datetime.utcnow()
+        )
 
     except ValidationError as e:
-        raise HTTPException(422, detail=e.errors())
+        errors = jsonable_encoder(e.errors(), custom_encoder={datetime: lambda v: v.isoformat()})
+        raise HTTPException(422, detail=errors)
+    except HashGenerationError as e:
+        raise HTTPException(400, detail=str(e))
     except MessageQueueError as e:
         raise HTTPException(503, detail=str(e))
-    except Exception as e:
+    except Exception:
         raise HTTPException(500, detail="Internal Server Error")
 
 
 @router.get("/", response_model=List[EventResponse])
 async def get_events(
-        page: int = Query(1, ge=1, description="Номер страницы"),
-        per_page: int = Query(100, ge=1, le=1000, description="Элементов на странице"),
+        page: int = Query(1, ge=1),
+        per_page: int = Query(100, ge=1, le=1000),
         event_name: Optional[str] = Query(None),
         start_date: Optional[datetime] = Query(None),
         end_date: Optional[datetime] = Query(None),
-        repo: EventRepository = Depends(get_repository)):
+        repo: PostgresEventRepository = Depends(get_repository)
+):
     """Получение событий с пагинацией и фильтрами"""
     try:
         offset = (page - 1) * per_page
-
-        # Загрузка внешних событий
         await _fetch_external_events(repo, page, per_page)
 
-        # Получение данных из БД
         events = await repo.get_events(
             limit=per_page,
             offset=offset,
@@ -137,18 +185,16 @@ async def get_events(
 
 @router.get("/search", response_model=Dict[str, Any])
 async def search_events(
-        query: str = Query(..., min_length=3, description="Поисковый запрос"),
-        page: int = Query(1, ge=1, description="Номер страницы"),
-        per_page: int = Query(100, ge=1, le=1000, description="Элементов на странице"),
+        query: str = Query(..., min_length=3),
+        page: int = Query(1, ge=1),
+        per_page: int = Query(100, ge=1, le=1000),
         continuation_token: Optional[str] = Query(None),
-        repo: EventRepository = Depends(get_repository)
+        repo: PostgresEventRepository = Depends(get_repository)
 ):
     """Поиск событий с курсорной пагинацией"""
     try:
-        # Синхронизация с внешним источником
         await _fetch_external_events(repo, page, per_page)
 
-        # Выполнение поиска
         result = await repo.search_events(
             query=query,
             page=page,
@@ -171,13 +217,13 @@ async def search_events(
 
 # endregion
 
-# region Helper Functions
+# region External Events Processing
 async def _fetch_external_events(
-        repo: EventRepository,
+        repo: PostgresEventRepository,
         page: int,
         per_page: int
 ):
-    """Загрузка событий из внешнего источника"""
+    """Загрузка и обработка событий из внешнего источника"""
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.post(
@@ -189,9 +235,13 @@ async def _fetch_external_events(
 
             for event_data in response.json():
                 try:
-                    validated = EventCreate(**event_data).model_dump()
+                    cleaned_data = remove_empty_values(event_data)
+                    if is_invalid_event(cleaned_data):
+                        continue
+
+                    validated = EventCreate(**cleaned_data).model_dump()
                     await repo.create_event(validated)
-                except (ValidationError, DuplicateEventError) as e:
+                except (ValidationError, DuplicateEventError):
                     continue
 
     except httpx.HTTPError as e:
