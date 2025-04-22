@@ -1,5 +1,7 @@
 from datetime import datetime
 from typing import Dict, Any, List, Optional
+
+from aio_pika.abc import AbstractRobustConnection
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,7 +14,7 @@ from my_venv.src.config import settings
 from my_venv.src.database.database import get_db
 from my_venv.src.models.pydentic_models import EventCreate, EventResponse
 from my_venv.src.services.deduplicator import Deduplicator
-from my_venv.src.services.repository import EventRepository
+from my_venv.src.services.repository import EventRepository, PostgresEventRepository
 from my_venv.src.utils.exceptions import (
     DatabaseError,
     DuplicateEventError,
@@ -37,7 +39,7 @@ async def get_redis() -> Redis:
         await redis.close()
 
 
-async def get_rabbitmq() -> aio_pika.Connection:
+async def get_rabbitmq() -> AbstractRobustConnection:
     """Устанавливает и возвращает подключение к RabbitMQ"""
     try:
         return await aio_pika.connect_robust(
@@ -52,8 +54,14 @@ async def get_repository(
         session: AsyncSession = Depends(get_db),
         redis: Redis = Depends(get_redis)
 ) -> EventRepository:
-    """Фабрика для создания репозитория событий"""
-    return EventRepository(session, Deduplicator(redis))
+    # Создаем Deduplicator из Redis подключения
+    deduplicator = Deduplicator(redis)
+
+    # Возвращаем КОНКРЕТНУЮ реализацию для PostgreSQL
+    return PostgresEventRepository(
+        session=session,
+        deduplicator=deduplicator
+    )
 
 
 # endregion
@@ -100,8 +108,7 @@ async def get_events(
         event_name: Optional[str] = Query(None),
         start_date: Optional[datetime] = Query(None),
         end_date: Optional[datetime] = Query(None),
-        repo: EventRepository = Depends(get_repository)
-):
+        repo: EventRepository = Depends(get_repository)):
     """Получение событий с пагинацией и фильтрами"""
     try:
         offset = (page - 1) * per_page
