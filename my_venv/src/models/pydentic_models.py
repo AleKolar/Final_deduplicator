@@ -5,7 +5,7 @@ from pydantic_core import PydanticCustomError
 
 from my_venv.src.services.event_hashing import EventHashService, HashGenerationError
 
-
+# !!! Делаем возможным работу кода при наличии любых полей(избавляемся от обязательных полей)
 class EventCreate(BaseModel):
     model_config = ConfigDict(
         extra='allow',
@@ -13,8 +13,8 @@ class EventCreate(BaseModel):
         arbitrary_types_allowed=False
     )
 
-    event_name: str = Field(..., min_length=1)
-    event_datetime: datetime
+    event_name: Optional[str] = Field(default=None)  # Теперь опционально
+    event_datetime: Optional[datetime] = None  # Теперь опционально
     event_hash: Optional[str] = Field(
         None,
         min_length=64,
@@ -23,23 +23,27 @@ class EventCreate(BaseModel):
     )
 
     @model_validator(mode='after')
-    def generate_event_hash(self) -> 'EventCreate':
-        if self.event_hash:
-            return self
+    def generate_event_hash(cls, instance: 'EventCreate') -> 'EventCreate':
+        if instance.event_hash:
+            return instance
+
+        if not instance.event_name:
+            # !!! Вот: случай, когда event_name отсутствует.
+            return instance
 
         try:
-            # Используем только существующие поля
-            present_fields = self.model_dump(
+            # Смотрим только на существующие поля
+            present_fields = instance.model_dump(
                 exclude_unset=True,
                 exclude_none=True,
                 exclude={'event_hash'}
             )
 
-            self.event_hash = EventHashService.generate_unique_fingerprint(
+            instance.event_hash = EventHashService.generate_unique_fingerprint(
                 present_fields,
-                self.event_name
+                instance.event_name
             )
-            return self
+            return instance
 
         except HashGenerationError as e:
             raise PydanticCustomError(
@@ -51,9 +55,9 @@ class EventCreate(BaseModel):
 
 class EventResponse(EventCreate):
     id: Optional[int] = None
-    created_at: datetime
-    raw_data: Dict[str, Any]
-    profile_id: Optional[str] = None  # Добавляем новые поля
+    created_at: Optional[datetime] = None  # Делаем опционально
+    raw_data: Dict[str, Any] = {}  # По умолчанию пустой словарь
+    profile_id: Optional[str] = None
     device_ip: Optional[str] = None
 
     model_config = ConfigDict(

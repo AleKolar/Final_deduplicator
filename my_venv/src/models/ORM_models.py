@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Dict, Any, Optional
-from sqlalchemy import Integer, String, DateTime, JSON, Index
+from sqlalchemy import Integer, String, DateTime, JSON, Index, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 class Model(DeclarativeBase):
@@ -11,12 +11,12 @@ class EventIncomingORM(Model):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     event_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
-    event_name: Mapped[str] = mapped_column(String(100), index=True)
-    event_datetime: Mapped[datetime] = mapped_column(DateTime(timezone=True) , index=True)
-    profile_id: Mapped[Optional[str]] = mapped_column(String(50), index=True)
-    device_ip: Mapped[Optional[str]] = mapped_column(String(15))
-    raw_data: Mapped[Dict[str, Any]] = mapped_column(JSON)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True) , index=True)
+    event_name: Mapped[str] = mapped_column(String(100), index=True, nullable=True)
+    event_datetime: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True, nullable=True)
+    profile_id: Mapped[Optional[str]] = mapped_column(String(50), index=True, nullable=True)
+    device_ip: Mapped[Optional[str]] = mapped_column(String(15), nullable=True)
+    raw_data: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
         Index("idx_main_analytics", "event_name", "event_datetime", "profile_id", "created_at"),

@@ -25,14 +25,17 @@ router = APIRouter(prefix="/events", tags=["events"])
 async def get_rabbitmq() -> AbstractRobustConnection:
     """Устанавливает подключение к RabbitMQ"""
     try:
-        return await aio_pika.connect_robust(
-            settings.RABBITMQ_URL,
-            timeout=10
+        connection = await aio_pika.connect_robust(
+            url=settings.RABBITMQ_URL,
+            timeout=10,
+            client_properties={"connection_name": "api_connection"}
         )
+        return connection
     except Exception as e:
         raise MessageQueueError(
             message="Ошибка подключения к брокеру сообщений",
-            error_details=str(e))
+            error_details=str(e)
+        )
 
 async def get_repository(
     session: AsyncSession = Depends(get_db),
@@ -43,7 +46,6 @@ async def get_repository(
         session=session,
         deduplicator=Deduplicator(redis)
     )
-
 
 @router.post("/", response_model=EventResponse, status_code=status.HTTP_202_ACCEPTED)
 async def create_event(
@@ -56,7 +58,7 @@ async def create_event(
         cleaned_data = remove_empty_values(payload)
 
         # 2. Валидация и создание объекта события
-        event = EventCreate(**cleaned_data)  # Может вызвать ValidationError
+        event = EventCreate(**cleaned_data)
 
         # 3. Подготовка данных для отправки
         event_data = event.model_dump()
@@ -80,8 +82,7 @@ async def create_event(
         )
 
     except ValidationError as e:
-        # Сериализация ошибок валидации
-        errors = jsonable_encoder(e.errors())  # Важно: e.errors() со скобками!
+        errors = jsonable_encoder(e.errors())
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={"errors": errors}
@@ -94,7 +95,6 @@ async def create_event(
         )
 
     except Exception:
-        # Общая ошибка сервера
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Внутренняя ошибка сервера"
@@ -123,6 +123,7 @@ async def trigger_external_sync(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Не удалось запланировать синхронизацию"
         )
+
 
 @router.get("/", response_model=List[EventResponse])
 async def get_events(
