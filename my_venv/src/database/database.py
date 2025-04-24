@@ -1,9 +1,9 @@
 import redis
-from redis.asyncio import from_url
+from redis.asyncio import from_url, Redis
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 
 from my_venv.src.config import settings
-from my_venv.src.models.ORM_models import Model
+from my_venv.src.models.ORM_models import Base
 
 DATABASE_URL = settings.DATABASE_URL
 REDIS_URL = settings.REDIS_URL
@@ -30,8 +30,13 @@ async def get_db() -> AsyncSession:
 
 async def create_tables():
    async with engine.begin() as conn:
-       await conn.run_sync(Model.metadata.create_all)
+       await conn.run_sync(Base.metadata.create_all)
 
-async def get_redis() -> redis:
-    Redis = from_url(REDIS_URL, decode_responses=True)
-    return Redis
+async def get_redis() -> Redis:
+    my_redis = Redis.from_url(
+        settings.REDIS_URL,
+        decode_responses=True,
+        socket_connect_timeout=5,
+        socket_keepalive=True
+    )
+    return my_redis

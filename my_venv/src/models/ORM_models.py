@@ -1,35 +1,53 @@
-from datetime import datetime
-from typing import Dict, Any, Optional
-from sqlalchemy import Integer, String, DateTime, JSON, Index, func
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy import Column, Integer, String, DateTime, func, Index
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.ext.asyncio import AsyncAttrs
+from sqlalchemy.orm import DeclarativeBase
 
-class Model(DeclarativeBase):
+
+class Base(AsyncAttrs, DeclarativeBase):
     pass
 
-class EventIncomingORM(Model):
-    __tablename__ = "events"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    event_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
-    event_name: Mapped[str] = mapped_column(String(100), index=True, nullable=True)
-    event_datetime: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True, nullable=True)
-    profile_id: Mapped[Optional[str]] = mapped_column(String(50), index=True, nullable=True)
-    device_ip: Mapped[Optional[str]] = mapped_column(String(15), nullable=True)
-    raw_data: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+class Event(Base):
+    __tablename__ = 'events'
+
+    # Технические поля
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    event_hash = Column(String(64), unique=True, nullable=False, index=True)
+
+    # Данные события
+    raw_data = Column(JSONB, nullable=False)
+    timestamps = Column(JSONB, nullable=False)  # Все временные метки
+
+    # Системные метки времени
+    processed_at = Column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
-        Index("idx_main_analytics", "event_name", "event_datetime", "profile_id", "created_at"),
-    ) # для аналитики, предположительно, запросы будут по этим полям
+        Index(
+            'ix_raw_data_gin',
+            'raw_data',
+            postgresql_using='gin',
+            postgresql_ops={'raw_data': 'jsonb_path_ops'}
+        ),
+        Index(
+            'ix_timestamps_gin',
+            'timestamps',
+            postgresql_using='gin',
+            postgresql_ops={'timestamps': 'jsonb_path_ops'}
+        ),
+        Index('ix_created_at', 'created_at', postgresql_ops={'created_at': 'DESC'})
+    )
 
-    def to_response(self) -> dict: # !!! А это: сериализация исходящих данных
+    def to_response(self) -> dict:
+        """Конвертация в формат для ответа API"""
         return {
             "id": self.id,
-            "event_hash": self.event_hash,
-            "event_name": self.event_name,
-            "event_datetime": self.event_datetime,
-            "profile_id": self.profile_id,
-            "device_ip": self.device_ip,
+            "created_at": self.created_at,
             "raw_data": self.raw_data,
-            "created_at": self.created_at
+            "timestamps": self.timestamps,
+            "system_timestamps": {
+                "processed_at": self.processed_at,
+                "created_at": self.created_at
+            }
         }

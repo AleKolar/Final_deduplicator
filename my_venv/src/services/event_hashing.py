@@ -1,67 +1,42 @@
 import hashlib
-import secrets
-from typing import Dict, Any, Optional
 import orjson
-from my_venv.src.services.normalize import normalize_for_hashing  # Оставляем для нормализации, если необходимо
-
-# !!! Делаем возможным работу кода при наличии любых полей(избавляемся от обязательных полей)
-class HashGenerationError(Exception):
-    """Ошибка генерации хеша."""
-    pass
+from typing import Dict, Any
+from my_venv.src.utils.cleaners import deep_clean
 
 
 class EventHashService:
     @staticmethod
-    def generate_unique_fingerprint(
-            raw_data: Dict[str, Any],
-            event_name: Optional[str] = None  # Это поле теперь опционально
-    ) -> str:
+    def generate_unique_fingerprint(raw_data: Dict[str, Any]) -> str:
         """
-        Генерация отпечатка на основе сырых данных и имени события
-        с учетом только присутствующих полей.
-        Если event_name не предоставлено, будет использовано значение по умолчанию.
+        Генерация хеша только для непустых значений
+        с автоматическим удалением технических полей
         """
         try:
-            # Если event_name отсутствует, установим значение по умолчанию
-            if event_name is None:
-                event_name = "default_event"  # По умолчанию
+            # 1. Глубокая очистка данных
+            cleaned_data = deep_clean(raw_data)
 
-            # Фильтрация и нормализация полей
-            processed_data = {
-                k: normalize_for_hashing(v, k)  # Вызываем нормализацию
-                for k, v in raw_data.items()
-                if v is not None  # Исключаем None значения
-            }
+            # 2. Проверка после очистки
+            if not cleaned_data:
+                return hashlib.sha3_256(orjson.dumps({})).hexdigest()  # Хеш пустого объекта
 
-            # Сортировка ключей для стабильности
-            sorted_items = sorted(processed_data.items())
+            # 3. Рекурсивная сортировка
+            def deep_sort(obj):
+                if isinstance(obj, dict):
+                    return {k: deep_sort(v) for k, v in sorted(obj.items())}
+                if isinstance(obj, list):
+                    return sorted(deep_sort(item) for item in obj)
+                return obj
 
-            # Формирование тела для отпечатка
-            fingerprint_payload = {
-                "event": event_name,
-                "fields": dict(sorted_items)  # Включаем только обработанные поля
-            }
+            sorted_data = deep_sort(cleaned_data)
 
-            # Детерминированная сериализация
+            # 4. Сериализация
             serialized = orjson.dumps(
-                fingerprint_payload,
+                sorted_data,
                 option=orjson.OPT_SORT_KEYS | orjson.OPT_NON_STR_KEYS
             )
 
-            # Генерация хеша
             return hashlib.sha3_256(serialized).hexdigest()
 
         except Exception as e:
-            raise HashGenerationError(f"Fingerprint error: {str(e)}") from e
+            raise RuntimeError(f"Hash generation error: {str(e)}")
 
-    @staticmethod
-    def verify_fingerprint(
-            event_hash: str,
-            raw_data: Dict[str, Any],
-            event_name: Optional[str] = None  # Это поле теперь опционально
-    ) -> bool:
-        generated = EventHashService.generate_unique_fingerprint(
-            raw_data,
-            event_name
-        )
-        return secrets.compare_digest(event_hash, generated)

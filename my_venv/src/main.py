@@ -7,7 +7,8 @@ from fastapi import FastAPI
 from my_venv.src.config import settings
 from my_venv.src.core.state import AppState
 from my_venv.src.database.database import engine
-from my_venv.src.models.ORM_models import Model
+from my_venv.src.models.ORM_models import Base
+
 from my_venv.src.routers import events
 from my_venv.src.utils.logger import logger
 
@@ -17,7 +18,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[AppState]:
     # Инициализация базы данных
     logger.info("Creating database tables...")
     async with engine.begin() as conn:
-        await conn.run_sync(Model.metadata.create_all)
+        await conn.run_sync(Base.metadata.create_all)
 
     # Инициализация Redis
     logger.info("Connecting to Redis...")
