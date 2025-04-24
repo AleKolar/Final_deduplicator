@@ -30,6 +30,8 @@ class Event(Base):
     # Системные метки времени
     processed_at = Column(DateTime(timezone=True), server_default=func.now())
 
+    event_type = Column(String)
+
     __table_args__ = (
         Index(
             'ix_raw_data_gin',

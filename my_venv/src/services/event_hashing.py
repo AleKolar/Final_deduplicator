@@ -1,7 +1,8 @@
 import hashlib
 import orjson
 from typing import Dict, Any
-from my_venv.src.utils.cleaners import deep_clean
+
+from my_venv.src.utils.data_cleaners import deep_clean
 
 
 class EventHashService:

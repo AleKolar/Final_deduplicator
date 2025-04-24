@@ -1,9 +1,8 @@
-import redis
-from redis.asyncio import from_url, Redis
+from redis.asyncio import Redis
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 
-from my_venv.src.config import settings
-from my_venv.src.models.ORM_models import Base
+from ..config import settings
+from ..models.ORM_models import Base
 
 DATABASE_URL = settings.DATABASE_URL
 REDIS_URL = settings.REDIS_URL

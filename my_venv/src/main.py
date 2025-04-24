@@ -1,15 +1,15 @@
-from contextlib import asynccontextmanager
 from typing import AsyncIterator
-import aio_pika
-from redis.asyncio import Redis
-from fastapi import FastAPI
 
-from my_venv.src.config import settings
+import aio_pika
+from fastapi import FastAPI
+from contextlib import asynccontextmanager
+from redis.asyncio import Redis
+
 from my_venv.src.core.state import AppState
 from my_venv.src.database.database import engine
 from my_venv.src.models.ORM_models import Base
-
 from my_venv.src.routers import events
+from my_venv.src.config import settings
 from my_venv.src.utils.logger import logger
 
 
