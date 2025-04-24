@@ -1,10 +1,11 @@
 from datetime import datetime
-from typing import List, Optional
+from typing import Dict, Any, List, Optional
+
 from aio_pika.abc import AbstractRobustConnection
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.encoders import jsonable_encoder
 from pydantic import ValidationError
 from redis.asyncio import Redis
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 import aio_pika
 from aio_pika import Message, DeliveryMode
@@ -12,12 +13,11 @@ import orjson
 
 from my_venv.src.config import settings
 from my_venv.src.database.database import get_db, get_redis
-from my_venv.src.models.ORM_models import Event
 from my_venv.src.models.pydentic_models import EventCreate, EventResponse
 from my_venv.src.services.deduplicator import Deduplicator
 from my_venv.src.services.repository import PostgresEventRepository
-from my_venv.src.utils.exceptions import MessageQueueError, DatabaseError
-from my_venv.src.utils.logger import logger
+from my_venv.src.utils.exceptions import DatabaseError, MessageQueueError
+from my_venv.src.utils.helper import remove_empty_values  # Предполагаем существование этого модуля
 
 router = APIRouter(prefix="/events", tags=["events"])
 
@@ -25,17 +25,14 @@ router = APIRouter(prefix="/events", tags=["events"])
 async def get_rabbitmq() -> AbstractRobustConnection:
     """Устанавливает подключение к RabbitMQ"""
     try:
-        connection = await aio_pika.connect_robust(
-            url=settings.RABBITMQ_URL,
-            timeout=10,
-            client_properties={"connection_name": "api_connection"}
+        return await aio_pika.connect_robust(
+            settings.RABBITMQ_URL,
+            timeout=10
         )
-        return connection
     except Exception as e:
         raise MessageQueueError(
             message="Ошибка подключения к брокеру сообщений",
-            error_details=str(e)
-        )
+            error_details=str(e))
 
 async def get_repository(
     session: AsyncSession = Depends(get_db),
@@ -50,82 +47,57 @@ async def get_repository(
 
 @router.post("/", response_model=EventResponse, status_code=status.HTTP_202_ACCEPTED)
 async def create_event(
-        payload: dict,
-        rabbitmq: AbstractRobustConnection = Depends(get_rabbitmq),
-        repo: PostgresEventRepository = Depends(get_repository)
+        payload: Dict[str, Any],
+        rabbitmq: aio_pika.Connection = Depends(get_rabbitmq)
 ):
+    """Обработка входящего события"""
     try:
-        logger.debug(f"Received payload: {payload}")
+        # 1. Очистка данных от пустых значений
+        cleaned_data = remove_empty_values(payload)
 
-        # 1. Предобработка данных
-        processed_data = {}
-        for key, value in payload.items():
-            if isinstance(value, bytes):
-                logger.warning(f"Bytes detected in field {key}, converting to string")
-                processed_data[key] = value.decode('utf-8', errors='replace')
-            else:
-                processed_data[key] = value
+        # 2. Валидация и создание объекта события
+        event = EventCreate(**cleaned_data)  # Может вызвать ValidationError
 
-        # 2. Валидация данных
-        try:
-            event = EventCreate(**processed_data)
-        except ValidationError as e:
-            logger.error(f"Validation error: {e.errors()}")
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail={"errors": e.errors()}
-            )
+        # 3. Подготовка данных для отправки
+        event_data = event.model_dump()
 
-        # 3. Сохранение в БД
-        try:
-            db_event, is_duplicate = await repo.create_event(event.model_dump())
-        except DatabaseError as e:
-            logger.error(f"Database error: {str(e)}")
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Ошибка сохранения события"
-            )
-
-        # 4. Отправка в RabbitMQ
-        try:
-            async with rabbitmq.channel() as channel:
-                message = Message(
-                    body=orjson.dumps(event.model_dump()),
+        # 4. Публикация в RabbitMQ
+        async with rabbitmq.channel() as channel:
+            await channel.default_exchange.publish(
+                Message(
+                    body=orjson.dumps(event_data),
                     delivery_mode=DeliveryMode.PERSISTENT,
                     headers={"source": "api"}
-                )
-                await channel.default_exchange.publish(
-                    message=message,
-                    routing_key="events_queue"
-                )
-                logger.debug("Message successfully published to RabbitMQ")
+                ),
+                routing_key="events_queue"
+            )
 
-        except aio_pika.exceptions.AMQPError as e:
-            logger.error(f"RabbitMQ publish error: {str(e)}")
-            raise MessageQueueError("Failed to publish message to queue")
-
-        # 5. Формирование ответа
+        # 5. Возврат ответа
         return EventResponse(
-            **event.model_dump(),
-            id=db_event.id if db_event else None,
-            created_at=db_event.created_at if db_event else datetime.now(),
-            system_timestamps={
-                "received_at": datetime.now(),
-                "processed_at": db_event.processed_at if db_event else None
-            }
+            **event_data,
+            id="queued",
+            created_at=datetime.now()
         )
 
-    except MessageQueueError as e:
+    except ValidationError as e:
+        # Сериализация ошибок валидации
+        errors = jsonable_encoder(e.errors())  # Важно: e.errors() со скобками!
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"errors": errors}
+        )
+
+    except MessageQueueError:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=str(e)
+            detail="Ошибка подключения к брокеру сообщений"
         )
 
-    except Exception as e:
-        logger.error(f"Unexpected error: {str(e)}", exc_info=True)
+    except Exception:
+        # Общая ошибка сервера
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Internal server error"
+            detail="Внутренняя ошибка сервера"
         )
 
 @router.post("/sync-external", status_code=status.HTTP_202_ACCEPTED)
@@ -152,38 +124,33 @@ async def trigger_external_sync(
             detail="Не удалось запланировать синхронизацию"
         )
 
-
 @router.get("/", response_model=List[EventResponse])
 async def get_events(
-        self,
-        limit: int = 100,
-        offset: int = 0,
-        event_name: Optional[str] = None,
-        start_date: Optional[datetime] = None,
-        end_date: Optional[datetime] = None
+    page: int = Query(1, ge=1, description="Номер страницы"),
+    per_page: int = Query(100, ge=1, le=1000, description="Количество элементов на странице"),
+    event_name: Optional[str] = Query(None, description="Фильтр по имени события"),
+    start_date: Optional[datetime] = Query(None, description="Начальная дата фильтрации"),
+    end_date: Optional[datetime] = Query(None, description="Конечная дата фильтрации"),
+    repo: PostgresEventRepository = Depends(get_repository)
 ) -> List[EventResponse]:
-    query = select(Event)
+    """Получение обработанных событий с пагинацией"""
+    try:
+        offset = (page - 1) * per_page
+        return await repo.get_events(
+            limit=per_page,
+            offset=offset,
+            event_name=event_name,
+            start_date=start_date,
+            end_date=end_date
+        )
 
-    if event_name:
-        query = query.where(Event.raw_data["event_name"].astext == event_name)
-
-    if start_date and end_date:
-        query = query.where(Event.created_at.between(start_date, end_date))
-    elif start_date:
-        query = query.where(Event.created_at >= start_date)
-    elif end_date:
-        query = query.where(Event.created_at <= end_date)
-
-    query = query.limit(limit).offset(offset)
-
-    result = await self.session.execute(query)
-    return [EventResponse.from_orm(e) for e in result.scalars()]
-
-# # Статистика
-# @router.get("/stats", response_model=dict)
-# async def get_event_stats(repo: PostgresEventRepository = Depends(get_repository)):
-#     return {
-#         "unique_events": repo.unique_count,
-#         "duplicate_events": repo.duplicate_count
-#     }
-
+    except DatabaseError as e:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except Exception:
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Внутренняя ошибка сервера"
+        )

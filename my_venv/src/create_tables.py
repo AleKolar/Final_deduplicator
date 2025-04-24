@@ -1,67 +1,32 @@
-from sqlalchemy import Column, String, DateTime, Integer, func, Index
-from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncAttrs
-from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy import Column, String, DateTime, JSON, Integer, func
+from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.orm import declarative_base
 import asyncio
 
 """ Создание таблицы events в БД PostgreSQL, так как таблица не создавалась, 
 позже можно было отмониторить с использованием DBeaver """
 
-
 DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:5432/events_db_1"
 
-
-class Base(AsyncAttrs, DeclarativeBase):
-    pass
-
+Base = declarative_base()
 
 class Event(Base):
-    __tablename__ = 'events'
-
-    # Технические поля
+    __tablename__ = "events"
     id = Column(Integer, primary_key=True, autoincrement=True)
+    event_hash = Column(String(64), unique=True, nullable=False)
+    event_name = Column(String(100), index=True)
+    event_datetime = Column(DateTime(timezone=True))
+    profile_id = Column(String(50))
+    device_ip = Column(String(15))
+    raw_data = Column(JSON)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
-    event_hash = Column(String(64), unique=True, nullable=False, index=True)
 
-    # Данные события
-    raw_data = Column(JSONB, nullable=False)
-    timestamps = Column(JSONB, nullable=False)  # Все временные метки
-
-    # Системные метки времени
-    processed_at = Column(DateTime(timezone=True), server_default=func.now())
-
-    event_type = Column(String)
-
-    __table_args__ = (
-        Index(
-            'ix_raw_data_gin',
-            'raw_data',
-            postgresql_using='gin',
-            postgresql_ops={'raw_data': 'jsonb_path_ops'}
-        ),
-        Index(
-            'ix_timestamps_gin',
-            'timestamps',
-            postgresql_using='gin',
-            postgresql_ops={'timestamps': 'jsonb_path_ops'}
-        ),
-        Index('ix_created_at', 'created_at', postgresql_ops={'created_at': 'DESC'})
-    )
-
-
-# async def create_tables():
-#     engine = create_async_engine(DATABASE_URL)
-#     async with engine.begin() as conn:
-#         await conn.run_sync(Base.metadata.create_all)
-#     print("Таблицы успешно созданы!")
-
-async def recreate_tables():
+async def create_tables():
     engine = create_async_engine(DATABASE_URL)
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
-    print("Таблицы успешно пересозданы!")
-
+    print("Таблицы созданы!")
 
 if __name__ == "__main__":
-    asyncio.run(recreate_tables())
+    asyncio.run(create_tables())
+

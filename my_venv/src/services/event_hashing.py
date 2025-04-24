@@ -1,43 +1,59 @@
 import hashlib
-import orjson
+import secrets
 from typing import Dict, Any
+import orjson
+from my_venv.src.services.normalize import normalize_for_hashing
 
-from my_venv.src.utils.data_cleaners import deep_clean
+
+class HashGenerationError(Exception):
+    pass
 
 
 class EventHashService:
     @staticmethod
-    def generate_unique_fingerprint(raw_data: Dict[str, Any]) -> str:
+    def generate_unique_fingerprint(
+            raw_data: Dict[str, Any],
+            event_name: str
+    ) -> str:
         """
-        Генерация хеша только для непустых значений
-        с автоматическим удалением технических полей
+        Генерация отпечатка на основе сырых данных и имени события
+        с учетом только присутствующих полей
         """
         try:
-            # 1. Глубокая очистка данных
-            cleaned_data = deep_clean(raw_data)
+            # Фильтрация и нормализация полей
+            processed_data = {
+                k: normalize_for_hashing(v, k)
+                for k, v in raw_data.items()
+                if v is not None
+            }
 
-            # 2. Проверка после очистки
-            if not cleaned_data:
-                return hashlib.sha3_256(orjson.dumps({})).hexdigest()  # Хеш пустого объекта
+            # Сортировка ключей для стабильности
+            sorted_items = sorted(processed_data.items())
 
-            # 3. Рекурсивная сортировка
-            def deep_sort(obj):
-                if isinstance(obj, dict):
-                    return {k: deep_sort(v) for k, v in sorted(obj.items())}
-                if isinstance(obj, list):
-                    return sorted(deep_sort(item) for item in obj)
-                return obj
+            fingerprint_payload = {
+                "event": event_name,
+                "fields": dict(sorted_items)
+            }
 
-            sorted_data = deep_sort(cleaned_data)
-
-            # 4. Сериализация
+            # Детерминированная сериализация
             serialized = orjson.dumps(
-                sorted_data,
+                fingerprint_payload,
                 option=orjson.OPT_SORT_KEYS | orjson.OPT_NON_STR_KEYS
             )
 
             return hashlib.sha3_256(serialized).hexdigest()
 
         except Exception as e:
-            raise RuntimeError(f"Hash generation error: {str(e)}")
+            raise HashGenerationError(f"Fingerprint error: {str(e)}") from e
 
+    @staticmethod
+    def verify_fingerprint(
+            event_hash: str,
+            raw_data: Dict[str, Any],
+            event_name: str
+    ) -> bool:
+        generated = EventHashService.generate_unique_fingerprint(
+            raw_data,
+            event_name
+        )
+        return secrets.compare_digest(event_hash, generated)
