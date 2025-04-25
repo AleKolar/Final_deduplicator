@@ -2,6 +2,7 @@ import hashlib
 import secrets
 from typing import Dict, Any
 import orjson
+
 from my_venv.src.services.normalize import normalize_for_hashing
 
 
@@ -15,10 +16,6 @@ class EventHashService:
             raw_data: Dict[str, Any],
             event_name: str
     ) -> str:
-        """
-        Генерация отпечатка на основе сырых данных и имени события
-        с учетом только присутствующих полей
-        """
         try:
             # Фильтрация и нормализация полей
             processed_data = {
@@ -27,18 +24,23 @@ class EventHashService:
                 if v is not None
             }
 
-            # Сортировка ключей для стабильности
-            sorted_items = sorted(processed_data.items())
+            # Дополнительная обработка для стабильности
+            sorted_items = sorted(
+                processed_data.items(),
+                key=lambda x: (x[0], str(x[1])))
 
             fingerprint_payload = {
                 "event": event_name,
-                "fields": dict(sorted_items)
+                "fields": {
+                    k: v for k, v in sorted_items
+                }
             }
 
-            # Детерминированная сериализация
             serialized = orjson.dumps(
                 fingerprint_payload,
-                option=orjson.OPT_SORT_KEYS | orjson.OPT_NON_STR_KEYS
+                option=orjson.OPT_SORT_KEYS |
+                       orjson.OPT_NON_STR_KEYS |
+                       orjson.OPT_INDENT_2
             )
 
             return hashlib.sha3_256(serialized).hexdigest()

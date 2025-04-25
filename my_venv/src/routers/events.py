@@ -11,15 +11,16 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 import aio_pika
 from aio_pika import Message, DeliveryMode
+from starlette.responses import JSONResponse
 
 from my_venv.src.config import settings
 from my_venv.src.database.database import get_db, get_redis
-from my_venv.src.models.pydentic_models import EventCreate, EventResponse
+from my_venv.src.models.pydentic_models import EventCreate, EventResponse, EventRequest
 from my_venv.src.services.deduplicator import Deduplicator
-from my_venv.src.services.normalize import preprocess_input
+from my_venv.src.services.normalize import preprocess_input, remove_empty_values
 from my_venv.src.services.repository import PostgresEventRepository
 from my_venv.src.utils.exceptions import DatabaseError, MessageQueueError
-from my_venv.src.utils.helper import remove_empty_values
+
 from my_venv.src.utils.logger import logger
 
 router = APIRouter(prefix="/events", tags=["events"])
@@ -191,8 +192,22 @@ async def health_check(
         logger.error("Health check failed: %s", str(e))
         raise HTTPException(503, detail=str(e))
 
+@router.post("/events/")
+async def handle_event(event_data: EventRequest):
+    try:
+        processed_data = preprocess_input(event_data.dict())
+        if "client_id" not in processed_data:
+            raise ValueError("Missing client_id")
+        return {"status": "success", "data": processed_data}
+    except Exception as e:
+        logger.error(f"Processing error: {str(e)}", exc_info=True)
+        return JSONResponse(
+            status_code=400,
+            content={"detail": "Ошибка обработки данных", "error": str(e)}
+        )
+
 
 @router.post("/endpoint")
-async def your_endpoint(data: dict = Body(...)):
+async def endpoint(data: dict = Body(...)):
     print(data)
     return {"message": "Data received"}

@@ -99,3 +99,8 @@ class EventResponse(EventCreate):
         json_encoders={datetime: lambda v: v.isoformat()},
         populate_by_name=True
     )
+
+class EventRequest(BaseModel):
+    feedback_text: str = ""
+    experiments: list = []
+    client_id: str

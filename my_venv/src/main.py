@@ -32,7 +32,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[AppState]:
     # Подключение к RabbitMQ
     logger.info("Connecting to RabbitMQ...")
     rabbit_connection = await aio_pika.connect(settings.RABBITMQ_URL)
-    rabbit_channel = await rabbit_connection.channel()
+    # rabbit_channel = await rabbit_connection.channel()
 
     try:
         logger.info("Application startup complete")
