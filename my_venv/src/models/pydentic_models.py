@@ -1,26 +1,64 @@
-from pydantic import BaseModel, model_validator, ConfigDict, Field
+import json
+
+from pydantic import BaseModel, model_validator, ConfigDict, Field, field_validator
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 from pydantic_core import PydanticCustomError
 
 from my_venv.src.services.event_hashing import EventHashService, HashGenerationError
+from my_venv.src.utils.logger import logger
 
 
 class EventCreate(BaseModel):
-    model_config = ConfigDict(
-        extra='allow',
-        validate_assignment=True,
-        arbitrary_types_allowed=False
-    )
-
-    event_name: str = Field(..., min_length=1)
-    event_datetime: datetime
+    id: Optional[str] = Field(None)
+    event_name: Optional[str] = Field(None)
+    event_datetime: Optional[datetime] = Field(None)
     event_hash: Optional[str] = Field(
         None,
-        min_length=64,
-        max_length=64,
         pattern=r'^[a-f0-9]{64}$'
     )
+    experiments: Optional[List] = Field(None)
+    discount_items_ids: Optional[List] = Field(None)
+    client_id: Optional[str] = Field(None)
+    discount: Optional[List] = Field(None)
+    price: Optional[float] = Field(None)
+    raw_data: Optional[dict] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    def parse_string_fields(cls, values: dict) -> dict:
+        for field in ["experiments", "discount_items_ids", "discount"]:
+            field_value = values.get(field)
+
+            if isinstance(field_value, str):
+                try:
+                    # Исправляем некорректные кавычки и парсим JSON
+                    corrected_str = field_value.replace("'", '"')
+                    values[field] = json.loads(corrected_str)
+
+                except json.JSONDecodeError as e:
+                    logger.error(
+                        f"JSON decode error in field '{field}': {str(e)}",
+                        extra={"input": field_value}
+                    )
+                    values[field] = []
+
+                except Exception as e:
+                    logger.error(
+                        f"Unexpected error in field '{field}': {str(e)}",
+                        extra={"input": field_value}
+                    )
+                    values[field] = []  # Дефолтное значение при других ошибках
+
+        return values
+
+    @field_validator("id", mode="before")
+    def validate_id(cls, v):
+        return str(v) if v else None
+
+    model_config = {
+        "extra": "allow",
+        "arbitrary_types_allowed": True
+    }
 
     @model_validator(mode='after')
     def generate_event_hash(self) -> 'EventCreate':

@@ -8,9 +8,9 @@ import asyncio
 
 DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:5432/events_db_1"
 
-Base = declarative_base()
+Model = declarative_base()
 
-class Event(Base):
+class Event(Model):
     __tablename__ = "events"
     id = Column(Integer, primary_key=True, autoincrement=True)
     event_hash = Column(String(64), unique=True, nullable=False)
