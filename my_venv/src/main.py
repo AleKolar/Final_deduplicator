@@ -1,5 +1,4 @@
 from typing import AsyncIterator
-
 import aio_pika
 from fastapi import FastAPI, Request
 from contextlib import asynccontextmanager

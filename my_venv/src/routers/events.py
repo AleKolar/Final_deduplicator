@@ -3,7 +3,7 @@ from typing import Dict, Any, List, Optional
 
 import orjson
 from aio_pika.abc import AbstractRobustConnection
-from fastapi import APIRouter, Depends, HTTPException, Query, status, Body
+from fastapi import APIRouter, Depends, HTTPException, Query, status, Body, Request
 from fastapi.encoders import jsonable_encoder
 from pydantic import ValidationError
 from redis.asyncio import Redis
@@ -16,6 +16,7 @@ from my_venv.src.config import settings
 from my_venv.src.database.database import get_db, get_redis
 from my_venv.src.models.pydentic_models import EventCreate, EventResponse
 from my_venv.src.services.deduplicator import Deduplicator
+from my_venv.src.services.normalize import preprocess_input
 from my_venv.src.services.repository import PostgresEventRepository
 from my_venv.src.utils.exceptions import DatabaseError, MessageQueueError
 from my_venv.src.utils.helper import remove_empty_values
@@ -51,10 +52,16 @@ async def get_repository(
 @router.post("/", response_model=EventResponse, status_code=status.HTTP_202_ACCEPTED)
 async def create_event(
         payload: Dict[str, Any],
-        rabbitmq: aio_pika.Connection = Depends(get_rabbitmq)
+        request: Request,
+        rabbitmq: aio_pika.Connection = Depends(get_rabbitmq),
+
 ):
     """Обработка входящего события"""
     try:
+        # 0. Посмотрим, как код работает со вложенными данными
+        raw_data = await request.json()
+        processed_data = preprocess_input(raw_data)
+
         # 1. Очистка данных от пустых значений
         cleaned_data = remove_empty_values(payload)
 
@@ -79,8 +86,8 @@ async def create_event(
         return EventResponse(
             **event_data,
             id="queued",
-            created_at=datetime.now()
-        )
+            created_at=datetime.now(),
+        ), {"status": "success", "data": processed_data}
 
     except ValidationError as e:
         errors = jsonable_encoder(e.errors())

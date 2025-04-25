@@ -23,13 +23,31 @@ def fix_invalid_json(data: str) -> Any:
             logger.error(f"Ошибка преобразования JSON: {str(e)}")
             return {}
 
+# Тут расширяем и расширяем возможности пред. обработки, главное не запутаться
 def preprocess_input(data: dict) -> dict:
-    """Предобработка входящих данных с попыткой исправления JSON"""
+    """Предобработка входящих данных с попыткой исправления JSON."""
     processed = {}
     for key, value in data.items():
         if isinstance(value, str):
-            if value.startswith(('[', '{')) and value.endswith((']', '}')):
-                value = fix_invalid_json(value)
+            if key == "experiments":
+                # Если значение - строка с массивом, пытаемся его разобрать
+                try:
+                    # Пробуем преобразовать одинарные кавычки в двойные и разобрать строку
+                    value = json.loads(fix_invalid_json(value))
+                except json.JSONDecodeError:
+                    logger.error(f"Ошибка при парсинге experiments: {value}")
+                    value = []  # Подставляем пустой массив в случае ошибки
+            else:
+                # Пробуем исправить некорректный JSON
+                try:
+                    value = json.loads(fix_invalid_json(value))
+                except json.JSONDecodeError:
+                    logger.error(f"Ошибка при парсинге ключа '{key}': {value}")
+                    value = value  # Оставляем значение неизменным
+        elif isinstance(value, list):
+            # Если значение — это список, обрабатываем каждый его элемент
+            value = [str(item) for item in value]  # Приводим все элементы к строкам
+
         processed[key] = value
     return processed
 
