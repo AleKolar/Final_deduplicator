@@ -52,85 +52,72 @@ async def get_repository(
 
 @router.post("/", response_model=EventResponse, status_code=status.HTTP_202_ACCEPTED)
 async def create_event(
-        payload: Dict[str, Any],
-        request: Request,
+        payload: dict = Body(...),
         rabbitmq: aio_pika.Connection = Depends(get_rabbitmq),
-
 ):
-    """Обработка входящего события"""
+    """Обработка входящего события с улучшенной обработкой ошибок"""
+    logger.debug(f"Received event: {payload}")
     try:
-        # 0. Посмотрим, как код работает со вложенными данными
-        raw_data = await request.json()
-        processed_data = preprocess_input(raw_data)
-
-        # 1. Очистка данных от пустых значений
-        cleaned_data = remove_empty_values(payload)
-
-        # 2. Валидация и создание объекта события
-        event = EventCreate(**cleaned_data)
-
-        # 3. Подготовка данных для отправки
-        event_data = event.model_dump()
-
-        # 4. Публикация в RabbitMQ
-        async with rabbitmq.channel() as channel:
-            await channel.default_exchange.publish(
-                Message(
-                    body=orjson.dumps(event_data),
-                    delivery_mode=DeliveryMode.PERSISTENT,
-                    headers={"source": "api"}
-                ),
-                routing_key="events_queue"
+        processed_data = preprocess_input(payload)
+        # 1. Валидация playtime_ms с учетом None
+        playtime = processed_data.get('playtime_ms')
+        if playtime is not None and not isinstance(playtime, (int, float)):
+            raise ValueError("playtime_ms must be numeric or null")
+        # 2. Проверка обязательных полей
+        if "client_id" not in processed_data:
+            logger.error("Missing client_id in processed data")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Missing required field: client_id"
             )
 
-        # 5. Возврат ответа
+        # 3. Валидация с помощью Pydantic
+        try:
+            event = EventCreate(**processed_data)
+        except ValidationError as e:
+            logger.error(f"Validation error: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=jsonable_encoder(e.errors())
+            )
+
+        # 4. Подготовка данных для отправки
+        event_data = event.model_dump()
+
+        # 5. Отправка в RabbitMQ
+        try:
+            async with rabbitmq.channel() as channel:
+                await channel.default_exchange.publish(
+                    Message(
+                        body=orjson.dumps(event_data),
+                        delivery_mode=DeliveryMode.PERSISTENT,
+                        headers={"source": "api"}
+                    ),
+                    routing_key="events_queue"
+                )
+        except Exception as e:
+            logger.error(f"RabbitMQ error: {str(e)}")
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Message broker unavailable"
+            )
+
+        # 6. Формирование ответа
         return EventResponse(
             **event_data,
             id="queued",
             created_at=datetime.now(),
-        ), {"status": "success", "data": processed_data}
-
-    except ValidationError as e:
-        errors = jsonable_encoder(e.errors())
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail={"errors": errors}
         )
 
-    except MessageQueueError:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Ошибка подключения к брокеру сообщений"
-        )
+    except HTTPException:
+        # Уже обработанные ошибки
+        raise
 
-    except Exception:
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Внутренняя ошибка сервера"
-        )
-
-@router.post("/sync-external", status_code=status.HTTP_202_ACCEPTED)
-async def trigger_external_sync(
-    rabbitmq: aio_pika.Connection = Depends(get_rabbitmq)
-):
-    """Запуск синхронизации с внешним источником"""
-    try:
-        async with rabbitmq.channel() as channel:
-            await channel.default_exchange.publish(
-                Message(
-                    body=b'',  # Пустое сообщение для триггера
-                    headers={"task_type": "external_sync"},
-                    delivery_mode=DeliveryMode.PERSISTENT
-                ),
-                routing_key="external_sync_queue"
-            )
-
-        return {"status": "Синхронизация поставлена в очередь"}
-
-    except Exception:
-        raise HTTPException(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Не удалось запланировать синхронизацию"
+            detail="Internal server error"
         )
 
 @router.get("/sort", response_model=List[EventResponse])
@@ -195,7 +182,7 @@ async def health_check(
 @router.post("/events/")
 async def handle_event(event_data: EventRequest):
     try:
-        processed_data = preprocess_input(event_data.dict())
+        processed_data = preprocess_input(event_data.model_dump())
         if "client_id" not in processed_data:
             raise ValueError("Missing client_id")
         return {"status": "success", "data": processed_data}

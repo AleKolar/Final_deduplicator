@@ -1,54 +1,38 @@
 import json
-
 from pydantic import BaseModel, model_validator, ConfigDict, Field, field_validator
 from datetime import datetime
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, Union
 from pydantic_core import PydanticCustomError
 
 from my_venv.src.services.event_hashing import EventHashService, HashGenerationError
+from my_venv.src.services.normalize import fix_invalid_json
 from my_venv.src.utils.logger import logger
 
 
 class EventCreate(BaseModel):
-    id: Optional[str] = Field(None)
+    id: Optional[int] = Field(None)
     event_name: Optional[str] = Field(None)
     event_datetime: Optional[datetime] = Field(None)
     event_hash: Optional[str] = Field(
         None,
         pattern=r'^[a-f0-9]{64}$'
     )
-    experiments: Optional[List] = Field(None)
-    discount_items_ids: Optional[List] = Field(None)
-    client_id: Optional[str] = Field(None)
-    discount: Optional[List] = Field(None)
-    price: Optional[float] = Field(None)
+    profile_id: Optional[str] = Field(None)
+    device_ip: Optional[str] = Field(None)
+    created_at: Optional[datetime] = Field(None)
     raw_data: Optional[dict] = Field(default_factory=dict)
 
     @model_validator(mode="before")
     def parse_string_fields(cls, values: dict) -> dict:
         for field in ["experiments", "discount_items_ids", "discount"]:
             field_value = values.get(field)
-
             if isinstance(field_value, str):
                 try:
-                    # Исправляем некорректные кавычки и парсим JSON
-                    corrected_str = field_value.replace("'", '"')
-                    values[field] = json.loads(corrected_str)
-
-                except json.JSONDecodeError as e:
-                    logger.error(
-                        f"JSON decode error in field '{field}': {str(e)}",
-                        extra={"input": field_value}
-                    )
-                    values[field] = []
-
+                    # Используем fix_invalid_json для коррекции
+                    values[field] = fix_invalid_json(field_value) or []
                 except Exception as e:
-                    logger.error(
-                        f"Unexpected error in field '{field}': {str(e)}",
-                        extra={"input": field_value}
-                    )
-                    values[field] = []  # Дефолтное значение при других ошибках
-
+                    logger.error(f"Error parsing {field}: {str(e)}")
+                    values[field] = []
         return values
 
     @field_validator("id", mode="before")
@@ -86,7 +70,6 @@ class EventCreate(BaseModel):
                 {"reason": str(e)}
             )
 
-
 class EventResponse(EventCreate):
     id: Optional[int] = None
     created_at: datetime
@@ -102,5 +85,22 @@ class EventResponse(EventCreate):
 
 class EventRequest(BaseModel):
     feedback_text: str = ""
-    experiments: list = []
-    client_id: str
+    experiments: list = Field(default_factory=list)
+    client_id: Optional[str] = Field(None)
+    playtime_ms: Optional[Union[int, float]] = Field(
+        None,
+        ge=0,
+        description="Playtime in milliseconds (optional)"
+    )
+    duration: Optional[Union[int, float]] = Field(None)
+
+    @field_validator('playtime_ms', mode="before")
+    def validate_playtime(cls, v):
+        if v in (None, "", "null"):
+            return None
+        if isinstance(v, str):
+            try:
+                return float(v) if '.' in v else int(v)
+            except ValueError:
+                raise ValueError("playtime_ms must be numeric")
+        return v

@@ -1,7 +1,11 @@
+import json
+import re
 from typing import AsyncIterator
 import aio_pika
 from fastapi import FastAPI, Request
 from contextlib import asynccontextmanager
+
+from fastapi.exceptions import RequestValidationError
 from redis.asyncio import Redis
 from starlette.responses import JSONResponse
 
@@ -54,6 +58,32 @@ app.include_router(events.router)
 
 
 @app.middleware("http")
+async def json_fix_middleware(request: Request, call_next):
+    if request.headers.get("content-type") == "application/json":
+        try:
+            body = await request.body()
+            # Исправление JSON
+            corrected = re.sub(
+                r',\s*(?=\s*[}\]])',
+                '',
+                body.decode(),
+                flags=re.MULTILINE
+            )
+            request.state._body = corrected.encode()  # Модифицируем тело запроса
+        except json.JSONDecodeError:
+            return JSONResponse(
+                status_code=400,
+                content={"detail": "Invalid JSON format"}
+            )
+        except Exception as e:
+            logger.error(f"JSON fix error: {str(e)}")
+
+    response = await call_next(request)
+    return response
+
+
+# Существующий middleware
+@app.middleware("http")
 async def add_process_time_header(request: Request, call_next):
     try:
         response = await call_next(request)
@@ -65,6 +95,29 @@ async def add_process_time_header(request: Request, call_next):
             content={"message": "An error occurred", "details": str(e)}
         )
 
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    """Обработчик ошибок валидации с логированием"""
+    logger.warning(
+        "Validation error for request %s %s: %s",
+        request.method,
+        request.url.path,
+        exc.errors()
+    )
+
+    return JSONResponse(
+        status_code=422,
+        content={
+            "detail": [
+                {
+                    "loc": list(error["loc"]),
+                    "msg": error["msg"],
+                    "type": error["type"]
+                } for error in exc.errors()
+            ]
+        }
+    )
 
 if __name__ == "__main__":
     import uvicorn

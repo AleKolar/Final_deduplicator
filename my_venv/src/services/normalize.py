@@ -8,153 +8,107 @@ from my_venv.src.utils.logger import logger
 
 
 def normalize_for_hashing(raw_data: Any, field_name: str) -> Dict[str, Any]:
-    """Универсальная нормализация данных для хеширования"""
+    """Нормализация данных с полным игнорированием null"""
+    cleaned_data = deep_clean(raw_data)
 
-    def _convert_value(value: Any) -> str:
-        """Рекурсивная конвертация значений с улучшенной обработкой ошибок"""
-        try:
-            # Глубокая очистка перед обработкой
-            cleaned_value = deep_clean(value)
+    def _convert(value: Any) -> str:
+        if isinstance(value, (datetime, str)):
+            return parse_datetime(value).isoformat()
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, sort_keys=True, default=str)
+        return str(value)
 
-            # Обработка дат
-            if isinstance(cleaned_value, (datetime, str)):
-                return parse_datetime(cleaned_value).isoformat()
-
-            # Обработка вложенных структур
-            if isinstance(cleaned_value, (dict, list)):
-                return json.dumps(
-                    cleaned_value,
-                    sort_keys=True,
-                    ensure_ascii=False,
-                    default=str,
-                    separators=(',', ':')
-                )
-
-            # Конвертация базовых типов
-            return str(cleaned_value)
-
-        except Exception as e:
-            logger.warning(f"Normalization error for {field_name}: {str(e)}")
-            return ""
-
-    try:
-        cleaned_data = deep_clean(raw_data)
-
-        if isinstance(cleaned_data, dict):
-            return {
-                k: _convert_value(v)
-                for k, v in cleaned_data.items()
-                if v is not None
-            }
-
-        return {field_name: _convert_value(cleaned_data)}
-
-    except Exception as e:
-        logger.error(f"Critical normalization error: {str(e)}")
-        return {}
+    if isinstance(cleaned_data, dict):
+        return {
+            k: _convert(v)
+            for k, v in cleaned_data.items()
+            if v is not None
+        }
+    return {field_name: _convert(cleaned_data)} if cleaned_data is not None else {}
 
 
 def robust_experiments_parser(experiments_str: str) -> List[Dict[str, Any]]:
-    """Устойчивый парсер экспериментов с обработкой некорректных данных"""
+    """Парсер экспериментов с улучшенной обработкой чисел"""
     experiments = []
-
     try:
-        # Удаление лишних символов
-        clean_str = re.sub(r"['\"\[\]\s]", "", experiments_str)
-        items = [item.strip() for item in clean_str.split(",") if item.strip()]
-
+        items = re.findall(r"'?(.*?:.*?)'?(?:,|$)", experiments_str)
         for item in items:
             if ":" not in item:
                 continue
 
             key, value = item.split(":", 1)
             key = key.strip()
-            value = value.strip().lower()
+            value = value.strip()
 
-            # Определение типа значения
-            if value == "true":
-                parsed_value = True
-            elif value == "false":
-                parsed_value = False
-            elif value == "null":
-                parsed_value = None
-            elif value.isdigit():
-                parsed_value = int(value)
-            elif re.match(r"^-?\d+\.?\d*$", value):
-                parsed_value = float(value)
-            else:
-                parsed_value = value
+            # Автоматическое определение типа
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                parsed = value.lower() if value.lower() in ('true', 'false', 'null') else value
 
-            experiments.append({key: parsed_value})
+            experiments.append({key: parsed})
 
     except Exception as e:
-        logger.error(f"Experiment parser error: {str(e)}")
+        logger.error(f"Experiment parsing failed: {str(e)}")
 
     return experiments
 
 
 def fix_invalid_json(data: str) -> Optional[dict]:
-    """Улучшенный корректор JSON с обработкой сложных случаев"""
-
+    """Исправление JSON с обработкой сложных случаев"""
     def _apply_fixes(s: str) -> str:
-        """Последовательность исправлений с защитой от ошибок"""
-        fixes = [
-            (r"(?<!\\)'", '"'),  # Кавычки
-            (r',\s*(?=\s*[}\]])', ''),  # Trailing commas
-            (r'([{,]\s*)(\w+)(\s*:)', r'\1"\2"\3'),  # Ключи
-            (r':\s*([^"{\[][^,}\]\n]*)', r':"\1"')  # Значения
-        ]
-
-        for pattern, replacement in fixes:
-            try:
-                s = re.sub(pattern, replacement, s, flags=re.MULTILINE)
-            except Exception as e:
-                logger.warning(f"Regex error: {str(e)}")
+        s = re.sub(r',\s*(?=\s*[}\]])', '', s, flags=re.MULTILINE)
+        s = re.sub(r"(?<!\\)'", '"', s)
+        s = re.sub(r'([{,]\s*)(\w+)(\s*:)', r'\1"\2"\3', s)
+        s = re.sub(r':\s*(true|false|null|\d+\.?\d*)(?=\s*[,}\]])', r':"\1"', s)
         return s
 
-    for attempt in range(3):
+    for _ in range(3):
         try:
             return json.loads(data)
         except json.JSONDecodeError:
             data = _apply_fixes(data)
-
-    logger.error("Failed to fix JSON after 3 attempts")
     return None
 
-
 def preprocess_input(data: dict) -> dict:
-    """Обработка входных данных с защитой от ошибок"""
-
-    def _safe_parse(value: Any) -> Any:
-        """Безопасная конвертация JSON строк"""
+    """Обработка данных с конвертацией null и типов"""
+    def _convert(value):
         if isinstance(value, str):
+            if value.lower() in ('null', 'none'):
+                return None
             try:
-                return json.loads(value)
-            except json.JSONDecodeError:
+                return float(value) if '.' in value else int(value)
+            except ValueError:
                 return value
         return value
 
-    processed = {}
-    for key, value in data.items():
-        try:
-            if key == "experiments":
-                processed[key] = robust_experiments_parser(str(value))
-            else:
-                processed[key] = _safe_parse(value)
-        except Exception as e:
-            logger.error(f"Field {key} processing error: {str(e)}")
-            processed[key] = value
+    return {k: _convert(v) for k, v in data.items()}
 
-    return remove_empty_values(processed)
+def _convert_value(value: Any) -> Any:
+    """Конвертация значений с обработкой JSON строк"""
+    if isinstance(value, str):
+        try:
+            # Пытаемся распарсить JSON строку
+            return json.loads(value)
+        except json.JSONDecodeError:
+            # Конвертация простых типов
+            if value.lower() in ('true', 'false'):
+                return value.lower() == 'true'
+            if value.lower() == 'null':
+                return None
+            try:
+                return int(value) if '.' not in value else float(value)
+            except ValueError:
+                return value
+    return value
 
 
 def remove_empty_values(data: Dict[str, Any]) -> Dict[str, Any]:
-    """Рекурсивное удаление пустых значений с улучшенной логикой"""
-
+    """Рекурсивное удаление пустых значений и null"""
     def _is_empty(val: Any) -> bool:
         if val is None:
             return True
-        if isinstance(val, (str, list, dict, bytes, tuple, set)):
+        if isinstance(val, (str, list, dict, bytes)):
             return len(val) == 0
         return False
 
@@ -162,7 +116,7 @@ def remove_empty_values(data: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(value, dict):
             return {k: _process(v) for k, v in value.items() if not _is_empty(v)}
         if isinstance(value, list):
-            return [_process(i) for i in value if not _is_empty(i)]
+            return [_process(v) for v in value if not _is_empty(v)]
         return value
 
     return _process(data)
