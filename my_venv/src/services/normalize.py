@@ -4,32 +4,32 @@ import json
 from typing import Any, Dict
 
 from my_venv.src.utils.data_cleaners import deep_clean, parse_datetime
+from my_venv.src.utils.logger import logger
 
 
 def fix_invalid_json(data: str) -> Any:
     """Исправление распространённых ошибок в JSON"""
     try:
-        # Попытка прямого парсинга
         return json.loads(data)
     except json.JSONDecodeError:
-        # Исправление распространённых проблем
-        fixed = re.sub(r"'\s*:\s*'", '": "', data)  # Ключи с одинарными кавычками
-        fixed = re.sub(r"'\s*,\s*'", '", "', fixed)  # Элементы списка
-        fixed = fixed.replace("'", '"')  # Все оставшиеся одинарные кавычки
-        return json.loads(fixed)
+        # Попытка исправления ключей с одинарными кавычками и подобных ошибок
+        fixed = re.sub(r"'\s*:\s*'", '": "', data)
+        fixed = re.sub(r"'\s*,\s*'", '", "', fixed)
+        fixed = fixed.replace("'", '"')
+        try:
+            return json.loads(fixed)
+        except json.JSONDecodeError as e:
+            # Логируем ошибку обработки, чтобы легче было отследить проблему
+            logger.error(f"Ошибка преобразования JSON: {str(e)}")
+            return {}
 
 def preprocess_input(data: dict) -> dict:
-    """Предобработка входящих данных"""
+    """Предобработка входящих данных с попыткой исправления JSON"""
     processed = {}
     for key, value in data.items():
         if isinstance(value, str):
-            # Обработка строк, которые могут быть JSON
             if value.startswith(('[', '{')) and value.endswith((']', '}')):
-                try:
-                    processed[key] = fix_invalid_json(value)
-                    continue
-                except json.JSONDecodeError:
-                    pass
+                value = fix_invalid_json(value)
         processed[key] = value
     return processed
 

@@ -1,5 +1,6 @@
 from typing import Dict, Any, List, Optional
 from datetime import datetime
+
 from sqlalchemy import select, and_, func, between, or_
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,8 +12,8 @@ from my_venv.src.utils.exceptions import DatabaseError
 from my_venv.src.utils.logger import logger
 
 
-async def is_duplicate(event_hash):
-    return Deduplicator.is_duplicate(event_hash)
+async def is_duplicate(redis, event_hash):
+    return Deduplicator.is_duplicate(event_hash, redis)
 
 
 class PostgresEventRepository:
@@ -128,7 +129,7 @@ class PostgresEventRepository:
 
             return {
                 "results": [
-                    EventResponse.from_orm(e)
+                    EventResponse.model_config(e)
                     for e in result.scalars().all()
                 ]
             }

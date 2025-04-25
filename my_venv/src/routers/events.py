@@ -3,7 +3,7 @@ from typing import Dict, Any, List, Optional
 
 import orjson
 from aio_pika.abc import AbstractRobustConnection
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status, Body
 from fastapi.encoders import jsonable_encoder
 from pydantic import ValidationError
 from redis.asyncio import Redis
@@ -183,3 +183,9 @@ async def health_check(
     except Exception as e:
         logger.error("Health check failed: %s", str(e))
         raise HTTPException(503, detail=str(e))
+
+
+@router.post("/endpoint")
+async def your_endpoint(data: dict = Body(...)):
+    print(data)
+    return {"message": "Data received"}
