@@ -1,13 +1,13 @@
-from datetime import datetime
-from typing import Dict, Any, List, Optional
+from datetime import datetime, timedelta
+from typing import Dict, Any, List, Optional, Tuple
 
 import orjson
 from aio_pika.abc import AbstractRobustConnection
-from fastapi import APIRouter, Depends, HTTPException, Query, status, Body, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, status, Body
 from fastapi.encoders import jsonable_encoder
 from pydantic import ValidationError
 from redis.asyncio import Redis
-from sqlalchemy import text
+from sqlalchemy import text, select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 import aio_pika
 from aio_pika import Message, DeliveryMode
@@ -17,9 +17,11 @@ from my_venv.src.config import settings
 from my_venv.src.database.database import get_db, get_redis
 from my_venv.src.models.pydentic_models import EventCreate, EventResponse, EventRequest
 from my_venv.src.services.deduplicator import Deduplicator
-from my_venv.src.services.normalize import preprocess_input, remove_empty_values
+from my_venv.src.services.event_hashing import EventHashService, HashGenerationError
+from my_venv.src.services.normalize import preprocess_input
 from my_venv.src.services.repository import PostgresEventRepository
 from my_venv.src.utils.exceptions import DatabaseError, MessageQueueError
+from my_venv.src.models.ORM_models import EventIncomingORM as Event
 
 from my_venv.src.utils.logger import logger
 
@@ -110,6 +112,7 @@ async def create_event(
             created_at=datetime.now(),
         )
 
+
     except HTTPException:
         # Уже обработанные ошибки
         raise
@@ -120,6 +123,94 @@ async def create_event(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Internal server error"
         )
+
+
+unique_events_counter = 0
+
+@router.post("/unique/", response_model=Tuple[EventResponse, str], status_code=status.HTTP_201_CREATED)
+async def create_event_unique(
+        event_data: EventCreate,
+        db: AsyncSession = Depends(get_db),
+        redis: Redis = Depends(get_redis)
+) -> Tuple[EventResponse, str]:
+    global unique_events_counter
+
+    # Генерация уник-ого хеша
+    try:
+        event_hash = EventHashService.generate_unique_fingerprint(
+            raw_data=event_data.model_dump(),
+            event_name=event_data.event_name
+        )
+    except HashGenerationError as e:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Ошибка генерации хеша: {str(e)}"
+        )
+
+    # Проверка дубликатов
+    deduplicator = Deduplicator(redis)
+    is_new = await deduplicator.check_and_lock(event_hash)
+
+    if not is_new:
+        # Получаем общее количество уник-ных событий из БД
+        total_unique = await db.scalar(select(func.count(Event.id)))
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "Событие уже существует в 7-дневном окне",
+                "stats": f"Всего уникальных событий: {total_unique}"
+            }
+        )
+
+    try:
+        # Сохранение в PostgreSQL
+        db_event = Event(
+            event_hash=event_hash,
+            event_name=event_data.event_name,
+            raw_data=event_data.model_dump(),
+            created_at=datetime.now()
+        )
+
+        db.add(db_event)
+        await db.commit()
+        await db.refresh(db_event)
+
+        # Обновление Redis и счетчика
+        await deduplicator.mark_processed(event_hash)
+        unique_events_counter += 1
+
+        # Получаем статистику
+        total_in_db = await db.scalar(select(func.count(Event.id)))
+        daily_stats = await db.scalar(
+            select(func.count(Event.id)).where(
+                Event.created_at >= datetime.now() - timedelta(days=1)
+            )
+        )
+
+        stats_message = (
+            f"Выявлено и сохранено уникальных событий: "
+            f"Сегодня: {daily_stats} | "
+            f"Всего: {total_in_db} | "
+            f"Новых в этом сеансе: {unique_events_counter}"
+        )
+
+        response_data = EventResponse(
+            id=db_event.id,
+            event_hash=db_event.event_hash,
+            event_name=db_event.event_name,
+            created_at=db_event.created_at,
+        )
+
+        return response_data, stats_message
+
+    except Exception as e:
+        await db.rollback()
+        await redis.delete(event_hash)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Ошибка сохранения события: {str(e)}"
+        )
+
 
 @router.get("/sort", response_model=List[EventResponse])
 async def get_events(

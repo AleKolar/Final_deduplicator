@@ -1,7 +1,9 @@
 from datetime import datetime
 from typing import Dict, Any, Optional
-from sqlalchemy import Integer, String, DateTime, JSON, Index, func
+
+from sqlalchemy import String, DateTime, JSON, Index, func, Integer
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
 
 class Model(DeclarativeBase):
     pass
@@ -9,6 +11,12 @@ class Model(DeclarativeBase):
 class EventIncomingORM(Model):
     __tablename__ = "events"
 
+    # id: Mapped[uuid.UUID] = mapped_column(
+    #     UUID(),
+    #     primary_key=True,
+    #     server_default=text("gen_random_uuid()"),
+    #     default=uuid.uuid4
+    # ) # Потом сделаем
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     event_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
     event_name: Mapped[str] = mapped_column(String(100), index=True)

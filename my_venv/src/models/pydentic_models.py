@@ -1,4 +1,3 @@
-import json
 from pydantic import BaseModel, model_validator, ConfigDict, Field, field_validator
 from datetime import datetime
 from typing import Dict, Any, Optional, Union
@@ -73,7 +72,8 @@ class EventCreate(BaseModel):
             )
 
 class EventResponse(EventCreate):
-    created_at: datetime # !!! Конкретное значение - время создания события ()
+    created_at: datetime # !!! Конкретное значение - время создания события (), ? надо, когда на сервере
+    # created_at: datetime = Field(default_factory=datetime.utcnow)
     raw_data: Dict[str, Any]
     profile_id: Optional[str] = None
     device_ip: Optional[str] = None
