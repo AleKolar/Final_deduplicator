@@ -12,6 +12,8 @@ def normalize_for_hashing(raw_data: Any, field_name: str) -> Dict[str, Any]:
     cleaned_data = deep_clean(raw_data)
 
     def _convert(value: Any) -> str:
+        if value in (None, "", "null", "none"):
+            return ""
         if isinstance(value, (datetime, str)):
             return parse_datetime(value).isoformat()
         if isinstance(value, (dict, list)):
@@ -70,37 +72,42 @@ def fix_invalid_json(data: str) -> Optional[dict]:
             data = _apply_fixes(data)
     return None
 
+
 def preprocess_input(data: dict) -> dict:
-    """Обработка данных с конвертацией null и типов"""
-    def _convert(value):
+    """Унифицированная обработка входных данных"""
+    data.pop('id', None)  # !!! Удалили id
+    def _convert_value(value: Any) -> Any:
+        """Рекурсивная конвертация значений"""
+        if isinstance(value, dict):
+            return {k: _convert_value(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [_convert_value(v) for v in value]
         if isinstance(value, str):
+            value = value.strip()
+
+            # Обработка специальных значений
+            if not value:
+                return None
             if value.lower() in ('null', 'none'):
                 return None
-            try:
-                return float(value) if '.' in value else int(value)
-            except ValueError:
-                return value
-        return value
-
-    return {k: _convert(v) for k, v in data.items()}
-
-def _convert_value(value: Any) -> Any:
-    """Конвертация значений с обработкой JSON строк"""
-    if isinstance(value, str):
-        try:
-            # Пытаемся распарсить JSON строку
-            return json.loads(value)
-        except json.JSONDecodeError:
-            # Конвертация простых типов
             if value.lower() in ('true', 'false'):
                 return value.lower() == 'true'
-            if value.lower() == 'null':
-                return None
+
+            # Попытка парсинга JSON
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                pass
+
+            # Конвертация чисел
             try:
                 return int(value) if '.' not in value else float(value)
             except ValueError:
-                return value
-    return value
+                pass
+
+        return value
+
+    return {k: _convert_value(v) for k, v in data.items()}
 
 
 def remove_empty_values(data: Dict[str, Any]) -> Dict[str, Any]:

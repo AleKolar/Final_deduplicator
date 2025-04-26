@@ -59,21 +59,23 @@ async def create_event(
     logger.debug(f"Received event: {payload}")
     try:
         processed_data = preprocess_input(payload)
+        data_without_id = {k: v for k, v in processed_data.items() if k != 'id'}
         # 1. Валидация playtime_ms с учетом None
         playtime = processed_data.get('playtime_ms')
         if playtime is not None and not isinstance(playtime, (int, float)):
             raise ValueError("playtime_ms must be numeric or null")
         # 2. Проверка обязательных полей
-        if "client_id" not in processed_data:
-            logger.error("Missing client_id in processed data")
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Missing required field: client_id"
-            )
+        # if "client_id" not in processed_data:
+        #     logger.error("Missing client_id in processed data")
+        #     raise HTTPException(
+        #         status_code=status.HTTP_400_BAD_REQUEST,
+        #         detail="Missing required field: client_id"
+        #     )
 
         # 3. Валидация с помощью Pydantic
         try:
-            event = EventCreate(**processed_data)
+            event = EventCreate.model_validate(data_without_id)
+            # event = EventCreate(**processed_data)
         except ValidationError as e:
             logger.error(f"Validation error: {str(e)}")
             raise HTTPException(
@@ -82,7 +84,7 @@ async def create_event(
             )
 
         # 4. Подготовка данных для отправки
-        event_data = event.model_dump()
+        event_data = event.model_dump(exclude={'created_at'})
 
         # 5. Отправка в RabbitMQ
         try:
@@ -105,7 +107,6 @@ async def create_event(
         # 6. Формирование ответа
         return EventResponse(
             **event_data,
-            id="queued",
             created_at=datetime.now(),
         )
 

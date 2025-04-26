@@ -30,9 +30,12 @@ def parse_datetime(value: Union[str, datetime]) -> datetime:
     if isinstance(value, datetime):
         return value
 
+    if not value:
+        return datetime.min
+
     value = str(value).strip()
 
-    # Попытка ISO формата
+        # Попытка ISO формата
     try:
         return datetime.fromisoformat(value)
     except ValueError:

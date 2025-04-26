@@ -5,6 +5,7 @@ from decimal import Decimal
 from typing import Dict, Any
 from pydantic import BaseModel
 
+from my_venv.src.models.ORM_models import Model
 from my_venv.src.utils.logger import logger
 
 
@@ -15,6 +16,12 @@ class JSONSerializer:
         Улучшенный сериализатор с расширенной обработкой типов
         """
         def _process_value(value: Any) -> Any:
+            if isinstance(value, Model):
+                # Сериализация SQLAlchemy моделей
+                return {c.name: _process_value(getattr(value, c.name))
+                    for c in value.__table__.columns
+                    if c.name != 'id'  # Исключаем ID при необходимости
+                }
             if isinstance(value, BaseModel):
                 return _process_value(value.model_dump())
             if isinstance(value, dict):
@@ -27,7 +34,9 @@ class JSONSerializer:
                 return base64.b64encode(value).decode('utf-8')
             if isinstance(value, Decimal):
                 return float(value)
-            if hasattr(value, 'isoformat'):  # Для date и других datetime-подобных
+            if hasattr(value, 'format'):
+                return value.isoformat()
+            if isinstance(value, datetime):
                 return value.isoformat()
             return value
 
@@ -83,3 +92,4 @@ class JSONSerializer:
         # Экранирование специальных символов
         json_str = json_str.replace('\\', '\\\\').replace("None", "null").replace("'", '"')
         return json_str
+

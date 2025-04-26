@@ -46,24 +46,26 @@ class EventCreate(BaseModel):
 
     @model_validator(mode='after')
     def generate_event_hash(self) -> 'EventCreate':
-        if self.event_hash:
-            return self
-
         try:
-            # Используем только существующие поля
+            # 1. Подготовка данных
             present_fields = self.model_dump(
                 exclude_unset=True,
                 exclude_none=True,
-                exclude={'event_hash'}
+                exclude={'event_hash', 'userId', 'created_at'}  # Добавляем created_at в исключения
             )
 
+            # 2. Обработка event_name
+            event_name = self.event_name or "undefined_event"
+
+            # 3. Генерация хеша
             self.event_hash = EventHashService.generate_unique_fingerprint(
                 present_fields,
-                self.event_name
+                event_name  # Гарантируем строковое значение
             )
             return self
 
         except HashGenerationError as e:
+            logger.error(f"Hash generation failed: {str(e)}")
             raise PydanticCustomError(
                 "hash_generation",
                 "Hash generation failed: {reason}",
@@ -71,10 +73,9 @@ class EventCreate(BaseModel):
             )
 
 class EventResponse(EventCreate):
-    id: Optional[int] = None
-    created_at: datetime
+    created_at: datetime # !!! Конкретное значение - время создания события ()
     raw_data: Dict[str, Any]
-    profile_id: Optional[str] = None  # Добавляем новые поля
+    profile_id: Optional[str] = None
     device_ip: Optional[str] = None
 
     model_config = ConfigDict(
@@ -87,11 +88,7 @@ class EventRequest(BaseModel):
     feedback_text: str = ""
     experiments: list = Field(default_factory=list)
     client_id: Optional[str] = Field(None)
-    playtime_ms: Optional[Union[int, float]] = Field(
-        None,
-        ge=0,
-        description="Playtime in milliseconds (optional)"
-    )
+    playtime_ms: Optional[Union[int, float]] = Field(None)
     duration: Optional[Union[int, float]] = Field(None)
 
     @field_validator('playtime_ms', mode="before")
