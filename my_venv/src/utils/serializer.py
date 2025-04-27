@@ -1,6 +1,7 @@
 import re
 import json
 from datetime import datetime
+from decimal import Decimal
 from typing import Any, Union, List, Dict
 
 
@@ -40,24 +41,48 @@ class DateTimeParser:
 
 class JSONRepairEngine:
     @staticmethod
-    def fix_string(data: str) -> Any:
-        original_data = data
-        fixes = [
-            (r'(?<![\\])"', '\\"'),  # Экранируем незаэкранированные двойные кавычки
-            (r"(?<!\\)'", '"'),
-            (r'\\x([0-9a-fA-F]{2})', lambda m: chr(int(m.group(1), 16))),
-            (r',\s*([}\]])', r'\1'),
-            (r'([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*:)', r'\1"\2"\3'),
-            (r':\s*([a-zA-Z_][a-zA-Z0-9_]*)', lambda m: f': "{m.group(1)}"')
-        ]
-
-        for pattern, repl in fixes:
-            data = re.sub(pattern, repl, data)
-
+    def fix_string(data: str) -> str:
         try:
-            return json.loads(data)
+            # Шаг 1: Замена неэкранированных одинарных кавычек
+            data = re.sub(r"(?<!\\)'", '"', data)
+
+            # Шаг 2: Добавление пропущенных запятых
+            data = re.sub(r'(?<=[}\]"])\s*(?=[{\[")])', ',', data)
+
+            # Шаг 3: Балансировка скобок
+            open_braces = data.count('{') - data.count('}')
+            open_brackets = data.count('[') - data.count(']')
+
+            if open_braces > 0:
+                data += '}' * open_braces
+            elif open_brackets > 0:
+                data += ']' * open_brackets
+
+            # Валидация результата
+            json.loads(data)
+            return data
         except json.JSONDecodeError:
-            return original_data
+            return data
+
+    # @staticmethod
+    # def fix_string(data: str) -> Any:
+    #     original_data = data
+    #     fixes = [
+    #         (r'(?<![\\])"', '\\"'),  # Экранируем незаэкранированные двойные кавычки
+    #         (r"(?<!\\)'", '"'),
+    #         (r'\\x([0-9a-fA-F]{2})', lambda m: chr(int(m.group(1), 16))),
+    #         (r',\s*([}\]])', r'\1'),
+    #         (r'([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*:)', r'\1"\2"\3'),
+    #         (r':\s*([a-zA-Z_][a-zA-Z0-9_]*)', lambda m: f': "{m.group(1)}"')
+    #     ]
+    #
+    #     for pattern, repl in fixes:
+    #         data = re.sub(pattern, repl, data)
+    #
+    #     try:
+    #         return json.loads(data)
+    #     except json.JSONDecodeError:
+    #         return original_data
 
 
 class DataNormalizer:
@@ -161,9 +186,11 @@ class ExperimentParser:
 class JsonSerializer:
     @staticmethod
     def serialize(data: Any) -> str:
-        def default_serializer(obj: Any) -> Any:
+        def default_serializer(obj):
             if isinstance(obj, datetime):
                 return obj.isoformat()
-            raise TypeError(f"Type {type(obj)} not serializable")
+            if isinstance(obj, Decimal):
+                return float(obj)
+            return str(obj)
 
-        return json.dumps(data, default=default_serializer, indent=2)
+        return json.dumps(data, default=default_serializer, separators=(',', ':'))
