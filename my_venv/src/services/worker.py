@@ -9,8 +9,8 @@ from my_venv.src.config import settings
 from my_venv.src.database.database import AsyncSessionLocal, get_redis
 from my_venv.src.models.pydentic_models import EventCreate
 from my_venv.src.services.deduplicator import Deduplicator
-from my_venv.src.services.repository import PostgresEventRepository
-from my_venv.src.utils.exceptions import DuplicateEventError
+from my_venv.src.services.repository import EventRepository
+from my_venv.src.utils.exceptions import DuplicateEventError, DatabaseError
 from my_venv.src.utils.logger import logger
 
 
@@ -23,33 +23,30 @@ async def handle_event_message(message: AbstractIncomingMessage, redis):
             event = EventCreate(**raw_data)
 
             async with AsyncSessionLocal() as session:
-                deduplicator = Deduplicator(redis)
-                repo = PostgresEventRepository(session, deduplicator)
+                repo = EventRepository(session, redis)
 
                 # Сохранение валидированных данных
-                created_event = await repo.create_event(event.model_dump())
-                logger.info(f"Event processed: {created_event.event_hash}")
+                created_event, status = await repo.save_event(event.model_dump())
+                logger.info(f"Event processed: {created_event.event_hash} - Status: {status}")
 
             await message.ack()
 
     except PydanticValidationError as e:
         logger.error(f"Invalid event data: {e.errors()}")
         await message.nack(requeue=False)
-    except DuplicateEventError as e:
-        logger.warning(f"Duplicate event: {e}")
+    except DatabaseError as e:
+        logger.warning(f"Database error: {e}")
         await message.ack()
     except Exception as e:
         logger.error(f"Error processing event: {str(e)}", exc_info=True)
         await message.nack(requeue=False)
-
 
 async def handle_sync_message(message: AbstractIncomingMessage, redis):
     """Обработчик для синхронизации внешних событий"""
     try:
         async with message.process():
             async with AsyncSessionLocal() as session:
-                deduplicator = Deduplicator(redis)
-                repo = PostgresEventRepository(session, deduplicator)
+                repo = EventRepository(session, redis)
 
                 await _fetch_external_events(repo)
 
@@ -59,8 +56,7 @@ async def handle_sync_message(message: AbstractIncomingMessage, redis):
         logger.error(f"Sync failed: {str(e)}", exc_info=True)
         await message.nack(requeue=False)
 
-
-async def _fetch_external_events(repo: PostgresEventRepository):
+async def _fetch_external_events(repo: EventRepository):
     """Загрузка и валидация событий из внешнего API"""
     try:
         async with httpx.AsyncClient(timeout=30) as client:
@@ -74,8 +70,9 @@ async def _fetch_external_events(repo: PostgresEventRepository):
                 try:
                     # Валидация через Pydantic модель
                     event = EventCreate(**event_data)
-                    await repo.create_event(event.model_dump())
-                except (PydanticValidationError, DuplicateEventError) as e:
+                    _, status = await repo.save_event(event.model_dump())
+                    logger.info(f"Fetched and saved event: {event.event_hash} - Status: {status}")
+                except (PydanticValidationError, DatabaseError) as e:
                     logger.warning(f"Skipping invalid event: {str(e)}")
                     continue
 
@@ -83,7 +80,6 @@ async def _fetch_external_events(repo: PostgresEventRepository):
         logger.error(f"External API error: {str(e)}")
     except Exception as e:
         logger.error(f"Unexpected sync error: {str(e)}")
-
 
 async def main():
     """Основная функция запуска воркера с обработкой shutdown"""
@@ -122,7 +118,7 @@ async def main():
             await sync_queue.consume(lambda msg: handle_sync_message(msg, redis))
 
             logger.info("Worker started. Waiting for messages...")
-            await asyncio.Future()
+            await asyncio.Future()  # Бесконечный цикл ожидания сообщений
 
     except asyncio.CancelledError:
         logger.info("Worker shutdown requested")
@@ -134,7 +130,7 @@ async def main():
             await connection.close()
         if redis:
             await redis.close()
-
+        logger.info("Worker shutdown gracefully.")
 
 if __name__ == "__main__":
     try:

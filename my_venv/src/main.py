@@ -1,4 +1,3 @@
-import json
 import re
 from typing import AsyncIterator
 import aio_pika
@@ -7,7 +6,6 @@ from contextlib import asynccontextmanager
 
 from fastapi.exceptions import RequestValidationError
 from redis.asyncio import Redis
-from starlette.responses import JSONResponse
 
 from my_venv.src.core.state import AppState
 from my_venv.src.database.database import engine
@@ -15,6 +13,7 @@ from my_venv.src.models.ORM_models import Model
 from my_venv.src.routers import events
 from my_venv.src.config import settings
 from my_venv.src.utils.logger import logger
+from my_venv.src.utils.serializer import JSONRepairEngine, DataNormalizer
 
 
 @asynccontextmanager
@@ -95,6 +94,55 @@ async def add_process_time_header(request: Request, call_next):
             content={"message": "An error occurred", "details": str(e)}
         )
 
+from fastapi import Request
+from fastapi.responses import JSONResponse
+import json
+
+@app.middleware("http")
+async def json_validation_middleware(request: Request, call_next):
+    if request.method in ("POST", "PUT", "PATCH"):
+        try:
+            body = await request.body()
+            if body:
+                # Попытка исправить JSON перед обработкой
+                fixed_body = JSONRepairEngine.fix_string(body.decode())
+                request._body = fixed_body.encode()
+                json_data = json.loads(fixed_body)  # Проверка валидности
+
+                # Обработка значений JSON для парсинга дат
+                json_data = DataNormalizer.deep_clean(json_data)
+
+                # На этом этапе можно устанавливать измененные данные обратно в request
+                request._json_data = json_data  # Пример, как можно хранить обработанные данные
+
+        except json.JSONDecodeError as e:
+            logger.warning(f"Invalid JSON received: {str(e)}")
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "detail": [{
+                        "type": "json_invalid",
+                        "loc": ["body"],
+                        "msg": "Invalid JSON format",
+                        "ctx": {"error": str(e)}
+                    }]
+                }
+            )
+        except Exception as e:
+            logger.error(f"Error processing request: {str(e)}")
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "detail": [{
+                        "type": "json_error",
+                        "loc": ["body"],
+                        "msg": "Error while processing the JSON body",
+                        "ctx": {"error": str(e)}
+                    }]
+                }
+            )
+
+    return await call_next(request)
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):

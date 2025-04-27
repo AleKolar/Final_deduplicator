@@ -1,95 +1,169 @@
+import re
 import json
-import base64
 from datetime import datetime
-from decimal import Decimal
-from typing import Dict, Any
-from pydantic import BaseModel
-
-from my_venv.src.models.ORM_models import Model
-from my_venv.src.utils.logger import logger
+from typing import Any, Union, List, Dict
 
 
-class JSONSerializer:
+DATE_FORMATS = [
+    '%Y-%m-%dT%H:%M:%S.%f%z',
+    '%Y-%m-%dT%H:%M:%S%z',
+    '%Y-%m-%d %H:%M:%S.%f',
+    '%Y-%m-%d %H:%M:%S',
+    '%Y%m%dT%H%M%S',
+    '%d.%m.%Y %H:%M:%S',
+    '%m/%d/%Y %I:%M %p'
+]
+
+
+class DateTimeParser:
     @classmethod
-    def serialize_for_hashing(cls, data: Dict[str, Any]) -> bytes:
-        """
-        Улучшенный сериализатор с расширенной обработкой типов
-        """
-        def _process_value(value: Any) -> Any:
-            if isinstance(value, Model):
-                # Сериализация SQLAlchemy моделей
-                return {c.name: _process_value(getattr(value, c.name))
-                    for c in value.__table__.columns
-                    if c.name != 'id'  # Исключаем ID при необходимости
-                }
-            if isinstance(value, BaseModel):
-                return _process_value(value.model_dump())
-            if isinstance(value, dict):
-                return {k: _process_value(v) for k, v in value.items()}
-            if isinstance(value, (list, tuple, set)):
-                return [_process_value(item) for item in value]
-            if isinstance(value, datetime):
-                return value.isoformat(timespec='microseconds')
-            if isinstance(value, bytes):
-                return base64.b64encode(value).decode('utf-8')
-            if isinstance(value, Decimal):
-                return float(value)
-            if hasattr(value, 'format'):
-                return value.isoformat()
-            if isinstance(value, datetime):
-                return value.isoformat()
+    def parse(cls, value: Union[str, datetime]) -> datetime:
+        if isinstance(value, datetime):
             return value
+        if isinstance(value, (int, float)):
+            return datetime.fromtimestamp(value)
 
+        value = str(value).strip()
         try:
-            processed = _process_value(data)
-            return json.dumps(
-                processed,
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(',', ':'),
-                default=lambda o: repr(o)  # Страховка для неизвестных типов
-            ).encode('utf-8')
-        except Exception as e:
-            logger.error(f"Serialization error: {str(e)}")
-            return json.dumps({"error": str(e)}).encode('utf-8')
-
-    @staticmethod
-    def fix_json_string(json_str: str) -> str:
-        """
-        Улучшенное исправление JSON с обработкой большего числа кейсов
-        """
-        json_str = json_str.strip()
-        if not json_str:
-            return json_str
-
-        # Первичная попытка парсинга
-        try:
-            json.loads(json_str)
-            return json_str
-        except json.JSONDecodeError:
+            return datetime.fromisoformat(value)
+        except ValueError:
             pass
 
-        # Исправление основных проблем
+        for fmt in DATE_FORMATS:
+            try:
+                return datetime.strptime(value, fmt)
+            except ValueError:
+                continue
+
+        raise ValueError(f"Unrecognized date format: {value}")
+
+
+class JSONRepairEngine:
+    @staticmethod
+    def fix_string(data: str) -> Any:
+        original_data = data
         fixes = [
-            # 1. Замена неэкранированных одинарных кавычек в значениях
-            (r"(?<!\\)'(?=\s*[:}\]])", '"'),
-
-            # 2. Исправление незакрытых кавычек после специальных символов
-            (r'([{:,]\s*)\'(?=.)', r'\1"'),
-
-            # 3. Удаление висящих запяток перед закрывающими скобками
-            (r',(\s*[}\]])', r'\1'),
-
-            # 4. Обработка неквотированных ключей
-            (r'(?<=[{:,])(\s*)(\w+)(\s*:)', r'\1"\2"\3:'),
-
-            # 5. Декодирование hex-последовательнотельности (\xXX)
+            (r'(?<![\\])"', '\\"'),  # Экранируем незаэкранированные двойные кавычки
+            (r"(?<!\\)'", '"'),
             (r'\\x([0-9a-fA-F]{2})', lambda m: chr(int(m.group(1), 16))),
-
-            # 6. Декодирование Unicode-символов (\uXXXX)
-            (r'\\u([0-9a-fA-F]{4})', lambda m: chr(int(m.group(1), 16)))
+            (r',\s*([}\]])', r'\1'),
+            (r'([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*:)', r'\1"\2"\3'),
+            (r':\s*([a-zA-Z_][a-zA-Z0-9_]*)', lambda m: f': "{m.group(1)}"')
         ]
-        # Экранирование специальных символов
-        json_str = json_str.replace('\\', '\\\\').replace("None", "null").replace("'", '"')
-        return json_str
 
+        for pattern, repl in fixes:
+            data = re.sub(pattern, repl, data)
+
+        try:
+            return json.loads(data)
+        except json.JSONDecodeError:
+            return original_data
+
+
+class DataNormalizer:
+    @classmethod
+    def deep_clean(cls, data: Any) -> Any:
+        def _is_meaningful(value: Any) -> bool:
+            return value is not None or (isinstance(value, (str, bytes)) and bool(value.strip()))
+
+        def _process_value(value: Any) -> Any:
+            if isinstance(value, dict):
+                return {k: _process_value(v) for k, v in value.items() if _is_meaningful(v)}
+
+            if isinstance(value, (list, tuple, set)):
+                return [_process_value(item) for item in value if _is_meaningful(item)]
+
+            if isinstance(value, str):
+                cleaned = value.strip()
+                if cleaned and cleaned[0] in ('{', '[', '(') and cleaned[-1] in ('}', ']', ')'):
+                    parsed = JSONRepairEngine.fix_string(cleaned)
+                    return _process_value(parsed) if parsed != cleaned else cleaned
+
+                if cleaned.lower() in ('null', 'none', 'nil'):
+                    return None
+
+                try:
+                    return DateTimeParser.parse(cleaned).isoformat()
+                except ValueError:
+                    pass
+
+            return value
+
+        return _process_value(data)
+
+
+class ExperimentParser:
+    @classmethod
+    def parse(cls, value: str) -> List[Dict[str, Any]]:
+        if not value:
+            return []
+
+        try:
+            data = json.loads(value.replace("'", '"'))
+            return cls._convert_experiment_values(data)
+        except json.JSONDecodeError:
+            return cls._parse_legacy_experiments(value)
+
+    @classmethod
+    def _parse_legacy_experiments(cls, value: str) -> List[Dict[str, Any]]:
+        experiments = []
+        buffer = []
+        in_quote = False
+        for char in value:
+            if char == "'":
+                in_quote = not in_quote
+            if char == ',' and not in_quote:
+                experiments.append(':'.join(buffer).strip())
+                buffer = []
+            else:
+                buffer.append(char)
+        if buffer:
+            experiments.append(':'.join(buffer).strip())
+
+        result = []
+        for exp in experiments:
+            if ':' in exp:
+                k, v = exp.split(':', 1)
+                result.append({k.strip(): cls.convert_value(v.strip())})
+        return result
+
+    @classmethod
+    def _convert_experiment_values(cls, data: Union[List, Dict]) -> Any:
+        if isinstance(data, list):
+            return [cls._convert_experiment_values(item) for item in data]
+        if isinstance(data, dict):
+            return {k: cls.convert_value(v) for k, v in data.items()}
+        return data
+
+    @staticmethod
+    def convert_value(value: Any) -> Any:
+        if isinstance(value, str):
+            lower_val = value.lower()
+            if lower_val == 'true':
+                return True
+            if lower_val == 'false':
+                return False
+
+            try:
+                return int(value)
+            except ValueError:
+                try:
+                    return float(value)
+                except ValueError:
+                    pass
+
+            if lower_val in ('null', 'none', 'nil'):
+                return None
+
+        return value
+
+
+class JsonSerializer:
+    @staticmethod
+    def serialize(data: Any) -> str:
+        def default_serializer(obj: Any) -> Any:
+            if isinstance(obj, datetime):
+                return obj.isoformat()
+            raise TypeError(f"Type {type(obj)} not serializable")
+
+        return json.dumps(data, default=default_serializer, indent=2)

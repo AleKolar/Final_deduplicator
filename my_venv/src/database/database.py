@@ -27,15 +27,16 @@ async def get_db() -> AsyncSession:
     async with AsyncSessionLocal() as session:
         yield session
 
+
 async def create_tables():
    async with engine.begin() as conn:
        await conn.run_sync(Model.metadata.create_all)
 
+
 async def get_redis() -> Redis:
-    my_redis = Redis.from_url(
+    return await Redis.from_url(
         settings.REDIS_URL,
         decode_responses=True,
-        socket_connect_timeout=5,
-        socket_keepalive=True
+        socket_connect_timeout=5
     )
-    return my_redis
+

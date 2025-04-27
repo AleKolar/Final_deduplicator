@@ -1,139 +1,130 @@
-from typing import Dict, Any, List, Optional
-from datetime import datetime
-
-from sqlalchemy import select, and_, func, between, or_
-from sqlalchemy.exc import SQLAlchemyError
+import json
+from datetime import timedelta, datetime
+from typing import Dict, Any, Optional, Tuple, List
+from aio_pika.abc import AbstractRobustConnection
+from redis.asyncio import Redis
+from sqlalchemy import select, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from my_venv.src.models.ORM_models import EventIncomingORM as Event
 from my_venv.src.models.pydentic_models import EventResponse
-from my_venv.src.services.deduplicator import Deduplicator
 from my_venv.src.utils.exceptions import DatabaseError
 from my_venv.src.utils.logger import logger
+from my_venv.src.utils.serializer import JsonSerializer
 
 
-async def is_duplicate(redis, event_hash):
-    return Deduplicator.is_duplicate(event_hash, redis)
+class EventRepository:
+    def __init__(
+        self,
+        db_session: AsyncSession,
+        redis: Redis,
+        rabbitmq: Optional[AbstractRobustConnection] = None
+    ):
+        self.db = db_session
+        self.redis = redis
+        self.rabbitmq = rabbitmq
+        self.unique_counter = 0
+        self._rabbitmq_channel = None
 
+    async def _get_rabbitmq_channel(self):
+        """Ленивая инициализация канала RabbitMQ"""
+        if not self._rabbitmq_channel and self.rabbitmq:
+            self._rabbitmq_channel = await self.rabbitmq.channel()
+            await self._rabbitmq_channel.declare_queue("events_queue")
+        return self._rabbitmq_channel
 
-class PostgresEventRepository:
-    def __init__(self, session: AsyncSession, deduplicator: Deduplicator):
-        self.session = session
-        self.deduplicator = deduplicator
+    async def _check_redis_duplicate(self, event_hash: str) -> bool:
+        return await self.redis.exists(event_hash)
 
-    async def is_duplicate(self, event_hash: str) -> bool:
-        stmt = select(Event.id).where(Event.event_hash == event_hash).limit(1)
-        result = await self.session.execute(stmt)
+    async def _check_postgres_duplicate(self, event_hash: str) -> bool:
+        result = await self.db.execute(
+            select(Event.id).where(Event.event_hash == event_hash).limit(1)
+        )
         return bool(result.scalar())
 
-    async def create_event(self, event_data: dict) -> tuple[Optional[Event], bool]:
+    async def is_duplicate(self, event_hash: str) -> Tuple[bool, str]:
+        redis_dup = await self._check_redis_duplicate(event_hash)
+        if redis_dup:
+            return True, "duplicate_in_redis"
+
+        pg_dup = await self._check_postgres_duplicate(event_hash)
+        if pg_dup:
+            return True, "duplicate_in_postgres"
+
+        return False, "unique"
+
+    async def save_event(self, event_data: dict) -> tuple:
         try:
-            this_is_duplicate = await self.is_duplicate(event_data["event_hash"])
-            if this_is_duplicate:
-                return None, True
-
+            # Сохранение в PostgreSQL
             event = Event(**event_data)
-            self.session.add(event)
-            await self.session.commit()
-            await self.session.refresh(event)
-            return event, False
+            self.db.add(event)
+            await self.db.commit()
+            await self.db.refresh(event)
 
-        except SQLAlchemyError as e:
-            await self.session.rollback()
-            raise DatabaseError("Failed to save event") from e
+            # Сохранение в Redis
+            await self.redis.setex(
+                name=event_data['event_hash'],
+                time=int(timedelta(days=7).total_seconds()),
+                value="1"
+            )
+
+            self.unique_counter += 1
+            return event, "saved"
+        except Exception:
+            await self.db.rollback()
+            await self.redis.delete(event_data.get('event_hash', ''))
+            raise
+
+    async def get_stats(self) -> Dict[str, int]:
+        return {
+            "unique_in_session": self.unique_counter,
+            "total_in_redis": await self.redis.dbsize(),
+            "total_in_postgres": await self._get_pg_count()
+        }
+
+    async def _get_pg_count(self) -> int:
+        result = await self.db.execute(select(func.count(Event.id)))
+        return result.scalar_one()
 
     async def get_events(
-            self,
-            filters: Dict[str, Any],
-            limit: int = 100,
-            offset: int = 0,
-            event_name: Optional[str] = None,
-            start_date: Optional[datetime] = None,
-            end_date: Optional[datetime] = None
+        self,
+        limit: int = 100,
+        offset: int = 0,
+        event_name: Optional[str] = None,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        filters: Optional[Dict[str, Any]] = None
     ) -> List[EventResponse]:
-        """Получение событий с фильтрацией"""
         try:
             query = select(Event)
 
             if event_name:
-                query = query.where(
-                    Event.raw_data["event_name"].as_string() == event_name
-                )
+                query = query.where(Event.event_name == event_name)
 
-            if start_date or end_date:
-                conditions = []
-                if start_date:
-                    conditions.append(Event.created_at >= start_date)
-                if end_date:
-                    conditions.append(Event.created_at <= end_date)
-                query = query.where(and_(*conditions))
+            date_filters = []
+            if start_date:
+                date_filters.append(Event.created_at >= start_date)
+            if end_date:
+                date_filters.append(Event.created_at <= end_date)
+            if date_filters:
+                query = query.where(and_(*date_filters))
 
-            for field, value in filters.items():
-                query = query.where(
-                    Event.raw_data[field].as_string() == str(value)
-                )
-
-            result = await self.session.execute(query.offset(offset).limit(limit))
-            return [EventResponse.model_config(e) for e in result.scalars().all()]
-
-        except SQLAlchemyError as e:
-            logger.error(f"Ошибка запроса: {str(e)}")
-            raise DatabaseError("Ошибка получения событий")
-
-    async def get_events_count(
-            self,
-            filters: Optional[Dict[str, Any]] = None,
-            time_range: Optional[Dict[str, datetime]] = None
-    ) -> int:
-        """Получение общего количества событий"""
-        try:
-            query = select(func.count(Event.id))
-
-            if time_range:
-                query = query.where(
-                    between(
-                        Event.created_at,
-                        time_range.get("start"),
-                        time_range.get("end")
-                    )
-                )
             if filters:
                 for field, value in filters.items():
                     query = query.where(
                         Event.raw_data[field].as_string() == str(value)
                     )
 
-            result = await self.session.execute(query)
-            return result.scalar_one()
+            query = query.offset(offset).limit(limit)
+            result = await self.db.execute(query)
+            events = result.scalars().all()
 
-        except SQLAlchemyError as e:
-            logger.error(f"Ошибка подсчета: {str(e)}")
-            raise DatabaseError("Ошибка подсчета событий")
+            return [
+                EventResponse.model_validate(
+                    json.loads(JsonSerializer.serialize(event))
+                ) for event in events
+            ]
 
-    async def search_events(
-            self,
-            query: str,
-            fields: List[str],
-            limit: int = 100
-    ) -> Dict[str, Any]:
-        """Поиск событий по тексту"""
-        try:
-            conditions = [Event.raw_data[field].as_string().ilike(f"%{query}%")
-                          for field in fields]
-
-            result = await self.session.execute(
-                select(Event)
-                .where(or_(*conditions))
-                .limit(limit)
-            )
-
-            return {
-                "results": [
-                    EventResponse.model_config(e)
-                    for e in result.scalars().all()
-                ]
-            }
-
-        except SQLAlchemyError as e:
-            logger.error(f"Ошибка поиска: {str(e)}")
-            raise DatabaseError("Ошибка выполнения поиска")
+        except Exception as e:
+            logger.error(f"Error retrieving events: {str(e)}", exc_info=True)
+            raise DatabaseError("Failed to retrieve events")
