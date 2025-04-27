@@ -1,9 +1,10 @@
 import json
 from pydantic import BaseModel, model_validator, ConfigDict, field_validator, Field
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict, Any
 
-from my_venv.src.services.event_hashing import EventHashService
+from my_venv.src.services.event_hashing import EventHashService, HashGenerationError
+from my_venv.src.utils.logger import logger
 from my_venv.src.utils.serializer import JsonSerializer, DataNormalizer
 
 
@@ -56,37 +57,47 @@ class EventResponse(EventCreate):
 
 
 class DynamicEvent(BaseModel):
+    event_hash: Optional[str] = Field(
+        None,
+        pattern=r"^[a-f0-9]{64}$",
+    )
+
     model_config = {
         "extra": "allow",
-        "validate_default": True
+        "validate_default": True,
+        "str_strip_whitespace": True
     }
 
-    @model_validator(mode='after')
-    def generate_event_hash(self) -> 'DynamicEvent':
-        # Нормализация данных
-        data = self.model_dump(
-            exclude={'event_hash'},
-            exclude_none=True,
-            exclude_unset=True,
-            by_alias=True
-        )
+    @model_validator(mode="after")
+    def generate_event_hash(self) -> "DynamicEvent":
+        if self.event_hash is not None:
+            return self
 
-        # Сортировка и сериализация
-        sorted_data = dict(sorted(data.items()))
-        payload = json.dumps(
-            sorted_data,
-            separators=(',', ':'),
-            default=self._serializer
-        )
+        try:
+            raw_data = self.model_dump(
+                exclude={"event_hash"},
+                exclude_none=True,
+                exclude_unset=True,
+                by_alias=True
+            )
 
-        # Генерация хеша
-        self.event_hash = hashlib.sha256(payload.encode()).hexdigest()
-        return self
+            event_name = self._detect_event_type(raw_data)
 
-    def _serializer(self, obj: Any) -> str:
-        """Кастомная сериализация для специальных типов"""
-        if isinstance(obj, set):
-            return json.dumps(sorted(obj))
-        if hasattr(obj, 'dict'):
-            return obj.dict()
-        return str(obj)
+            self.event_hash = EventHashService.generate_unique_fingerprint(
+                data=raw_data,
+                event_name=event_name
+            )
+            return self
+
+        except HashGenerationError as e:
+            logger.error(f"Hash generation failed: {e}")
+            raise ValueError("Event validation error") from e
+
+    @staticmethod
+    def _detect_event_type(data: Dict[str, Any]) -> str:
+        """Определение типа события без доступа к экземпляру"""
+        if 'event_type' in data:
+            return str(data['event_type'])
+        if 'action' in data:
+            return f"action_{data['action']}"
+        return "default_event"

@@ -44,3 +44,5 @@ class EventHashService:
 
         except Exception as e:
             raise HashGenerationError(f"Fingerprint error: {str(e)}")
+
+
