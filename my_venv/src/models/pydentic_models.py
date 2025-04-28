@@ -1,13 +1,13 @@
 from pydantic import BaseModel
-from typing import Union
-
-from my_venv.src.services.event_hashing import EventHashService, HashGenerationError
-from my_venv.src.utils.logger import logger
-from my_venv.src.utils.serializer import DataNormalizer
 from pydantic import ConfigDict, Field, ValidationError, field_validator, model_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 import json
+
+from my_venv.src.services.event_hashing import EventHashService, HashGenerationError
+from my_venv.src.utils.logger import logger
+from my_venv.src.utils.serializer import DataNormalizer
+
 
 class EventBase(BaseModel):
     discount_items_ids: Optional[List[str]] = Field(default_factory=list)

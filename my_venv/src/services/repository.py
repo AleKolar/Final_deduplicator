@@ -1,6 +1,8 @@
 import json
 from datetime import timedelta, datetime
 from typing import Dict, Any, Optional, Tuple, List
+
+from aio_pika import Channel
 from aio_pika.abc import AbstractRobustConnection
 from redis.asyncio import Redis
 from sqlalchemy import select, func, and_
@@ -8,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from my_venv.src.models.ORM_models import EventIncomingORM as Event
 from my_venv.src.models.pydentic_models import EventResponse
+from my_venv.src.services.deduplicator import Deduplicator
 from my_venv.src.services.event_hashing import EventHashService
 from my_venv.src.utils.exceptions import DatabaseError
 from my_venv.src.utils.logger import logger
@@ -15,15 +18,12 @@ from my_venv.src.utils.serializer import JsonSerializer
 
 
 class EventRepository:
-    def __init__(
-        self,
-        db_session: AsyncSession,
-        redis: Redis,
-        rabbitmq: Optional[AbstractRobustConnection] = None
-    ):
+
+    def __init__(self, db_session: AsyncSession, redis: Redis, rabbitmq: Optional[AbstractRobustConnection] = None):
         self.db = db_session
         self.redis = redis
         self.rabbitmq = rabbitmq
+        self.deduplicator = Deduplicator(redis)
         self.unique_counter = 0
         self._rabbitmq_channel = None
 
@@ -43,46 +43,45 @@ class EventRepository:
         )
         return bool(result.scalar())
 
-    async def is_duplicate(self, event_hash: str) -> Tuple[bool, str]:
-        redis_dup = await self._check_redis_duplicate(event_hash)
-        if redis_dup:
-            return True, "duplicate_in_redis"
-
-        pg_dup = await self._check_postgres_duplicate(event_hash)
-        if pg_dup:
-            return True, "duplicate_in_postgres"
-
-        return False, "unique"
+    async def is_duplicate(self, event_hash: str) -> bool:
+        # redis_dup = await self._check_redis_duplicate(event_hash)
+        # if redis_dup:
+        #     return True, "duplicate_in_redis"
+        # pg_dup = await self._check_postgres_duplicate(event_hash)
+        # if pg_dup:
+        #     return True, "duplicate_in_postgres"
+        #
+        # return False, "unique"
+        if await self.redis.exists(event_hash):
+            return True
+        return await self._check_postgres_duplicate(event_hash)
 
 
 
     async def save_event(self, event_data: dict) -> tuple:
-        """Сохранение события в БД и Redis с проверкой уникальности"""
-        event_hash = EventHashService.generate_unique_fingerprint(event_data,
-        event_data.get('event_name', 'default_event'))
+        """Основной метод сохранения события с гарантией уникальности"""
+        event_hash = EventHashService.generate_unique_fingerprint(
+            event_data,
+            event_data.get('event_name', 'default_event')
+        )
 
-        is_duplicate = await self.is_duplicate(event_hash)
-        if is_duplicate:
-            raise Exception("Duplicate event detected!")
-        try:
-            # Сохранение в PostgreSQL
-            event = Event(**event_data)
-            self.db.add(event)
+        async def _save_to_db():
+            """Callback для безопасного сохранения"""
+            u_event = Event(**{**event_data, 'event_hash': event_hash})
+            self.db.add(u_event)
             await self.db.commit()
-            await self.db.refresh(event)
+            await self.db.refresh(u_event)
+            return u_event
 
-            # Сохранение в Redis
-            await self.redis.setex(
-                name=event_data['event_hash'],
-                time=int(timedelta(days=7).total_seconds()),
-                value="1"
-            )
-
+        try:
+            # Атомарная проверка и сохранение
+            event = await self.deduplicator.safe_save(event_hash, _save_to_db)
             self.unique_counter += 1
             return event, "saved"
-        except Exception:
+
+        except Exception as e:
             await self.db.rollback()
-            await self.redis.delete(event_data.get('event_hash', ''))
+            logger.error(f"Failed to save event: {str(e)}")
             raise
 
     async def get_stats(self) -> Dict[str, int]:

@@ -1,48 +1,60 @@
 import hashlib
+import json
 from typing import Dict, Any
+import uuid
+from datetime import datetime
 
-from my_venv.src.utils.serializer import ExperimentParser, DataNormalizer, JsonSerializer
+from my_venv.src.utils.serializer import DataNormalizer
 
 
 class HashGenerationError(Exception):
     pass
 
+
 class EventHashService:
     @staticmethod
     def generate_unique_fingerprint(data: Dict[str, Any], event_name: str) -> str:
-        """Генерация хеша с учетом всех нормализаций"""
+        """
+        Генерация уникального хеша для события.
+        """
         try:
-            # 1. Нормализация данных с использованием DataNormalizer
-            normalized_data = DataNormalizer.deep_clean(data)
+            # Создаем копию и добавляем гарантированно уникальные метки (новый UUID)
+            processed_data = data.copy()
+            processed_data['__event_uuid'] = str(uuid.uuid4())
+            processed_data['__timestamp'] = datetime.now().isoformat()  # Добавляем текущее время
 
-            # 2. Фильтрация значений и их конвертация
+            normalized_data = DataNormalizer.deep_clean(processed_data)
+
             filtered_data = {
-                k: ExperimentParser.convert_value(v)
-                for k, v in normalized_data.items()
-                if ExperimentParser.convert_value(v) is not None
+                k: v for k, v in normalized_data.items()
+                if not EventHashService._is_empty(v)
             }
 
-            # 3. Обработка experiments
-            if 'raw_data' in filtered_data and 'experiments' in filtered_data['raw_data']:
-                experiments = filtered_data['raw_data']['experiments']
-                if isinstance(experiments, (list, dict)):
-                    filtered_data['raw_data']['experiments'] = sorted(
-                        experiments.items() if isinstance(experiments, dict) else experiments,
-                        key=lambda x: str(x)
-                    )
-
-            # 4. Сериализация данных для создания хеша
             payload = {
                 "event": event_name,
-                "fields": dict(sorted(filtered_data.items()))
+                "data": dict(sorted(filtered_data.items()))
             }
-            event_hash = hashlib.sha3_256(
-                JsonSerializer.serialize(payload).encode()
+
+            # import logging
+            # logging.debug(f"Hash payload: {payload}")
+
+            return hashlib.sha3_256(
+                json.dumps(payload, sort_keys=True, ensure_ascii=False).encode('utf-8')
             ).hexdigest()
-            # 5. Генерируем хеш
-            return event_hash
 
         except Exception as e:
-            raise HashGenerationError(f"Fingerprint error: {str(e)}")
+            raise HashGenerationError(f"Fingerprint generation failed: {str(e)}")
+
+
+    @staticmethod
+    def _is_empty(value) -> bool:
+        """Проверка на полностью пустое значение"""
+        if value is None:
+            return True
+        if isinstance(value, str):
+            return len(value.strip()) == 0 or value in [",[]", "[]"]
+        if isinstance(value, (list, dict, set)):
+            return len(value) == 0
+        return False
 
 

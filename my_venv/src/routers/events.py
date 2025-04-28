@@ -9,6 +9,7 @@ import aio_pika
 from my_venv.src.database.database import get_db, get_redis
 from my_venv.src.models.pydentic_models import EventResponse, EventCreate, EventBase
 from my_venv.src.services.dependencies import get_repository, get_rabbitmq
+from my_venv.src.services.event_hashing import EventHashService
 from my_venv.src.services.repository import EventRepository
 from my_venv.src.utils.logger import logger
 from my_venv.src.utils.serializer import DataNormalizer
@@ -32,26 +33,36 @@ router = APIRouter(prefix="/events", tags=["events"])
 #         )
 
 @router.post("/events")
-async def process_events(
-        events: List[EventCreate],
-        repo: EventRepository = Depends(get_repository)
-):
+async def process_events(events: List[EventCreate], repo: EventRepository = Depends(get_repository)):
     results = {"total_processed": 0, "saved": 0, "duplicates": 0, "errors": []}
 
     for event in events:
         results["total_processed"] += 1
         try:
-            # Подготовка данных перед обработкой
-            cleaned_event_data = DataNormalizer.deep_clean(event.model_dump())
+            raw_data = event.model_dump()
+            logger.debug(f"Raw event data: {raw_data}")
 
-            # Сохранение события с учетом дублирования
-            await repo.save_event(cleaned_event_data)  # Здесь уже будет обработка дубликатов
-            results["saved"] += 1
-        except Exception as e:
-            if "Duplicate event detected!" in str(e):
+            event_hash = EventHashService.generate_unique_fingerprint(
+                raw_data,
+                raw_data.get('event_name', 'default_event')
+            )
+            logger.debug(f"Generated hash: {event_hash}")
+
+            if await repo.is_duplicate(event_hash):
+                logger.info(f"Duplicate detected: {event_hash}")
                 results["duplicates"] += 1
-            else:
-                results["errors"].append({"error": str(e)})
+                continue
+
+            cleaned_data = DataNormalizer.deep_clean(raw_data)
+            logger.debug(f"Cleaned data: {cleaned_data}")
+
+            cleaned_data['event_hash'] = event_hash
+            await repo.save_event(cleaned_data)
+            results["saved"] += 1
+
+        except Exception as e:
+            logger.error(f"Error processing event: {str(e)}", exc_info=True)
+            results["errors"].append({"error": str(e)})
 
     return results
 
