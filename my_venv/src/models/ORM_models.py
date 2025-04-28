@@ -11,20 +11,20 @@ class Model(DeclarativeBase):
 class EventIncomingORM(Model):
     __tablename__ = "events"
 
-    # id: Mapped[uuid.UUID] = mapped_column(
-    #     UUID(),
-    #     primary_key=True,
-    #     server_default=text("gen_random_uuid()"),
-    #     default=uuid.uuid4
-    # ) # Потом сделаем
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    event_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
-    event_name: Mapped[str] = mapped_column(String(100), index=True)
-    event_datetime: Mapped[datetime] = mapped_column(DateTime(timezone=True) , index=True)
+    event_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    event_name: Mapped[str] = mapped_column(String(100), default="unknown")
+    event_datetime: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     profile_id: Mapped[Optional[str]] = mapped_column(String(50), index=True)
     device_ip: Mapped[Optional[str]] = mapped_column(String(15))
-    raw_data: Mapped[Dict[str, Any]] = mapped_column(JSON)
+    raw_data: Mapped[Dict[str, Any]] = mapped_column(JSON, default={})
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True) , server_default=func.now(), index=True)
+
+    def __init__(self, **kwargs):
+        system_fields = {'event_hash', 'event_name'}
+        sys_data = {k: v for k, v in kwargs.items() if k in system_fields}
+        raw_data = {k: v for k, v in kwargs.items() if k not in system_fields}
+        super().__init__(**sys_data, raw_data=raw_data)
 
     __table_args__ = (
         Index("idx_main_analytics", "event_name", "event_datetime", "profile_id", "created_at"),

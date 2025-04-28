@@ -5,7 +5,6 @@ import asyncio
 
 async def send_test_message():
     try:
-        # Подключение с таймаутом
         connection = await aio_pika.connect(
             "amqp://guest:guest@localhost/",
             timeout=5.0
@@ -14,13 +13,11 @@ async def send_test_message():
         async with connection:
             channel = await connection.channel()
 
-            # Удаляем очередь если существует
             try:
                 await channel.queue_delete("events")
             except aio_pika.exceptions.ChannelClosed:
                 pass
 
-            # Создаем очередь с правильными параметрами
             queue = await channel.declare_queue(
                 name="events",
                 durable=True,

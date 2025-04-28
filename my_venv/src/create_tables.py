@@ -1,6 +1,9 @@
+from datetime import datetime
+from typing import Optional, Dict, Any
+
 from sqlalchemy import Column, String, DateTime, JSON, Integer, func
 from sqlalchemy.ext.asyncio import create_async_engine
-from sqlalchemy.orm import declarative_base
+from sqlalchemy.orm import declarative_base, Mapped, mapped_column
 import asyncio
 
 """ Создание таблицы events в БД PostgreSQL, так как таблица не создавалась, 
@@ -12,14 +15,15 @@ Model = declarative_base()
 
 class Event(Model):
     __tablename__ = "events"
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    event_hash = Column(String(64), unique=True, nullable=False)
-    event_name = Column(String(100), index=True)
-    event_datetime = Column(DateTime(timezone=True))
-    profile_id = Column(String(50))
-    device_ip = Column(String(50))
-    raw_data = Column(JSON)
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    event_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    event_name: Mapped[str] = mapped_column(String(100), default="unknown")
+    event_datetime: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    profile_id: Mapped[Optional[str]] = mapped_column(String(50), index=True)
+    device_ip: Mapped[Optional[str]] = mapped_column(String(15))
+    raw_data: Mapped[Dict[str, Any]] = mapped_column(JSON, default={})
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 async def create_tables():
     engine = create_async_engine(DATABASE_URL)

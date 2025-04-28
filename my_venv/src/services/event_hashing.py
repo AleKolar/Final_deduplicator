@@ -17,12 +17,12 @@ class EventHashService:
 
             # 2. Фильтрация значений и их конвертация
             filtered_data = {
-                k: ExperimentParser.convert_value(v)  # Применение конвертации в зависимости от типа
+                k: ExperimentParser.convert_value(v)
                 for k, v in normalized_data.items()
                 if ExperimentParser.convert_value(v) is not None
             }
 
-            # 3. Специальная обработка experiments
+            # 3. Обработка experiments
             if 'raw_data' in filtered_data and 'experiments' in filtered_data['raw_data']:
                 experiments = filtered_data['raw_data']['experiments']
                 if isinstance(experiments, (list, dict)):
@@ -36,11 +36,11 @@ class EventHashService:
                 "event": event_name,
                 "fields": dict(sorted(filtered_data.items()))
             }
-
-            # 5. Генерируем хеш
-            return hashlib.sha3_256(
+            event_hash = hashlib.sha3_256(
                 JsonSerializer.serialize(payload).encode()
             ).hexdigest()
+            # 5. Генерируем хеш
+            return event_hash
 
         except Exception as e:
             raise HashGenerationError(f"Fingerprint error: {str(e)}")

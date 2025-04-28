@@ -1,4 +1,5 @@
 import re
+import traceback
 from typing import AsyncIterator
 import aio_pika
 from fastapi import FastAPI, Request
@@ -57,18 +58,68 @@ app.include_router(events.router)
 
 
 @app.middleware("http")
+async def unified_json_middleware(request: Request, call_next):
+    if request.method in ("POST", "PUT", "PATCH"):
+        try:
+            body = await request.body()
+            if not body:
+                return await call_next(request)
+
+            corrected = re.sub(r',\s*(?=\s*[}\]])', '', body.decode())
+            fixed_body = JSONRepairEngine.fix_string(corrected)
+
+            json_data = json.loads(fixed_body)
+            json_data = DataNormalizer.deep_clean(json_data)
+
+            request._body = json.dumps(json_data).encode()
+            request.state.clean_data = json_data
+
+        except json.JSONDecodeError as e:
+            logger.error(f"Invalid JSON: {e}")
+            return JSONResponse(
+                status_code=422,
+                content={"detail": "Invalid JSON format"}
+            )
+        except Exception as e:
+            logger.error(f"JSON processing error: {e}")
+            return JSONResponse(
+                status_code=400,
+                content={"detail": "Malformed request"}
+            )
+
+    return await call_next(request)
+
+@app.middleware("http")
+async def debug_middleware(request: Request, call_next):
+    body = await request.body()
+    print("Raw request body:", body.decode())
+    return await call_next(request)
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.critical(
+        "Unhandled exception: %s\n%s",
+        str(exc),
+        traceback.format_exc()
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error"}
+    )
+
+
+@app.middleware("http")
 async def json_fix_middleware(request: Request, call_next):
     if request.headers.get("content-type") == "application/json":
         try:
             body = await request.body()
-            # Исправление JSON
             corrected = re.sub(
                 r',\s*(?=\s*[}\]])',
                 '',
                 body.decode(),
                 flags=re.MULTILINE
             )
-            request.state._body = corrected.encode()  # Модифицируем тело запроса
+            request.state._body = corrected.encode()
         except json.JSONDecodeError:
             return JSONResponse(
                 status_code=400,
@@ -104,16 +155,13 @@ async def json_validation_middleware(request: Request, call_next):
         try:
             body = await request.body()
             if body:
-                # Попытка исправить JSON перед обработкой
                 fixed_body = JSONRepairEngine.fix_string(body.decode())
                 request._body = fixed_body.encode()
-                json_data = json.loads(fixed_body)  # Проверка валидности
+                json_data = json.loads(fixed_body)
 
-                # Обработка значений JSON для парсинга дат
                 json_data = DataNormalizer.deep_clean(json_data)
 
-                # На этом этапе можно устанавливать измененные данные обратно в request
-                request._json_data = json_data  # Пример, как можно хранить обработанные данные
+                request._json_data = json_data
 
         except json.JSONDecodeError as e:
             logger.warning(f"Invalid JSON received: {str(e)}")
@@ -178,4 +226,5 @@ if __name__ == "__main__":
         reload_includes=["*.py"]
     )
 
-# uvicorn my_venv.src.main:app --host 127.0.0.1 --port 8001 --log-level debug
+# uvicorn my_venv.src.main:app --reload
+

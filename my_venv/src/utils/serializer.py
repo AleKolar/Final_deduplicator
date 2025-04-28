@@ -42,47 +42,15 @@ class DateTimeParser:
 class JSONRepairEngine:
     @staticmethod
     def fix_string(data: str) -> str:
-        try:
-            # Шаг 1: Замена неэкранированных одинарных кавычек
-            data = re.sub(r"(?<!\\)'", '"', data)
-
-            # Шаг 2: Добавление пропущенных запятых
-            data = re.sub(r'(?<=[}\]"])\s*(?=[{\[")])', ',', data)
-
-            # Шаг 3: Балансировка скобок
-            open_braces = data.count('{') - data.count('}')
-            open_brackets = data.count('[') - data.count(']')
-
-            if open_braces > 0:
-                data += '}' * open_braces
-            elif open_brackets > 0:
-                data += ']' * open_brackets
-
-            # Валидация результата
-            json.loads(data)
-            return data
-        except json.JSONDecodeError:
-            return data
-
-    # @staticmethod
-    # def fix_string(data: str) -> Any:
-    #     original_data = data
-    #     fixes = [
-    #         (r'(?<![\\])"', '\\"'),  # Экранируем незаэкранированные двойные кавычки
-    #         (r"(?<!\\)'", '"'),
-    #         (r'\\x([0-9a-fA-F]{2})', lambda m: chr(int(m.group(1), 16))),
-    #         (r',\s*([}\]])', r'\1'),
-    #         (r'([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*:)', r'\1"\2"\3'),
-    #         (r':\s*([a-zA-Z_][a-zA-Z0-9_]*)', lambda m: f': "{m.group(1)}"')
-    #     ]
-    #
-    #     for pattern, repl in fixes:
-    #         data = re.sub(pattern, repl, data)
-    #
-    #     try:
-    #         return json.loads(data)
-    #     except json.JSONDecodeError:
-    #         return original_data
+        # Удаление лишних экранирующих символов
+        data = re.sub(r"\\+(')", r"\1", data)
+        # Балансировка кавычек
+        data = re.sub(r"(?<!\\)'(?=[:,\]}])", '"', data)
+        # Исправление синтаксиса ключей
+        data = re.sub(r'(?<!")(\w+)(?=":)', r'"\1"', data)
+        # Добавление пропущенных запятых
+        data = re.sub(r'(?<=[}\]"])\s*(?=[{[])', ',', data)
+        return data
 
 
 class DataNormalizer:
@@ -100,6 +68,18 @@ class DataNormalizer:
 
             if isinstance(value, str):
                 cleaned = value.strip()
+
+                # Попробуем исправить "неправильные" представления списков
+                if cleaned.startswith(",") and cleaned.endswith("[]"):
+                    cleaned = cleaned.replace(",", "").strip()  # Убираем лишнюю запятую
+
+                # Обработка JSON-строк, представляющих массивы
+                if cleaned.startswith("[") and cleaned.endswith("]"):
+                    try:
+                        return json.loads(cleaned)  # Пробуем распарсить как JSON
+                    except json.JSONDecodeError:
+                        pass
+
                 if cleaned and cleaned[0] in ('{', '[', '(') and cleaned[-1] in ('}', ']', ')'):
                     parsed = JSONRepairEngine.fix_string(cleaned)
                     return _process_value(parsed) if parsed != cleaned else cleaned
@@ -186,11 +166,20 @@ class ExperimentParser:
 class JsonSerializer:
     @staticmethod
     def serialize(data: Any) -> str:
-        def default_serializer(obj):
+        """
+        Сериализует объект в JSON-строку с обработкой специальных типов:
+        - datetime -> ISO-формат
+        - Decimal -> float
+        """
+        def default_serializer(obj: Any) -> Any:
             if isinstance(obj, datetime):
                 return obj.isoformat()
             if isinstance(obj, Decimal):
                 return float(obj)
-            return str(obj)
+            if isinstance(obj, dict):
+                return {k: default_serializer(v) for k, v in obj.items()}
+            if isinstance(obj, list):
+                return [default_serializer(item) for item in obj]
+            raise TypeError(f"Unserializable type: {type(obj)}")
 
-        return json.dumps(data, default=default_serializer, separators=(',', ':'))
+        return json.dumps(data, default=default_serializer, separators=(",", ":"))

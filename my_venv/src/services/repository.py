@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from my_venv.src.models.ORM_models import EventIncomingORM as Event
 from my_venv.src.models.pydentic_models import EventResponse
+from my_venv.src.services.event_hashing import EventHashService
 from my_venv.src.utils.exceptions import DatabaseError
 from my_venv.src.utils.logger import logger
 from my_venv.src.utils.serializer import JsonSerializer
@@ -53,7 +54,16 @@ class EventRepository:
 
         return False, "unique"
 
+
+
     async def save_event(self, event_data: dict) -> tuple:
+        """Сохранение события в БД и Redis с проверкой уникальности"""
+        event_hash = EventHashService.generate_unique_fingerprint(event_data,
+        event_data.get('event_name', 'default_event'))
+
+        is_duplicate = await self.is_duplicate(event_hash)
+        if is_duplicate:
+            raise Exception("Duplicate event detected!")
         try:
             # Сохранение в PostgreSQL
             event = Event(**event_data)
